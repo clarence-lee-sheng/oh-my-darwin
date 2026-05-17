@@ -10,15 +10,40 @@ import { dirname, join, resolve } from "node:path";
 import { stdin, stdout, stderr } from "node:process";
 import { fileURLToPath } from "node:url";
 import { spawnCodex } from "../runtime/bridge.js";
+import { runGoalAttempt } from "../runtime/goal-attempt.js";
 import { readSpec, type SpecSlice } from "../spec/parse.js";
 import { scoreRun } from "../scorer/index.js";
 import { readFrontier, writeFrontier } from "../state/frontier.js";
 import {
   appendEvolution,
   readLastEvolutionHint,
+  readRecentEvolution,
 } from "../state/history.js";
 import { loadAndValidate, type Harness } from "../harness/load.js";
 import { invokeProposer } from "../proposer/invoke.js";
+import {
+  buildGoalProposerPrompt,
+  invokeGoalProposer,
+  type GoalCandidate,
+} from "../proposer/goal-proposer.js";
+import { buildContext } from "../strategy/context.js";
+import {
+  safeHook,
+  isParentArray,
+  isString,
+  isBoolean,
+  isPopulation,
+  type ParentAttempt,
+  type Population,
+  type StrategyContext,
+} from "../strategy/contract.js";
+import {
+  defaultSelectParents,
+  defaultMutationDirective,
+  defaultAcceptCandidate,
+  defaultUpdatePopulation,
+} from "../strategy/defaults.js";
+import { readNiches, writeNiches } from "../state/niches.js";
 import { init } from "./init.js";
 import { baseline } from "./baseline.js";
 import {
@@ -64,6 +89,17 @@ interface LoopOptions {
   maxDurationMs: number;
   /** Whether to prompt between iterations even when bounded. */
   interactive: boolean;
+  /**
+   * If true, each iteration uses Codex's /goal command as the execution
+   * primitive instead of building a harness module. The proposer outputs
+   * {goal, knobs, rationale} JSON; the runner injects /goal and watches
+   * .darwin/events.jsonl for completion.
+   */
+  goalMode: boolean;
+  /** Per-attempt hard time cap in ms (goal-mode only). */
+  attemptMaxMs: number;
+  /** Quiet period in ms before goal is considered done (goal-mode only). */
+  attemptQuietMs: number;
 }
 
 const MAX_CONSECUTIVE_FAILURES = 3;
@@ -85,7 +121,25 @@ function parseLoopOptions(args: string[]): LoopOptions {
   }
 
   const interactive = args.includes("--interactive");
-  return { maxIterations, maxDurationMs, interactive };
+  const goalMode = args.includes("--goal-mode");
+
+  let attemptMaxMs = 30 * 60 * 1000;
+  const attIdx = args.indexOf("--attempt-max");
+  if (attIdx !== -1) {
+    const parsed = parseDuration(args[attIdx + 1] ?? "");
+    if (parsed !== null) attemptMaxMs = parsed;
+    else throw new Error(`invalid --attempt-max value: ${args[attIdx + 1] ?? ""} (use forms like 90s, 30m, 2h)`);
+  }
+
+  let attemptQuietMs = 60_000;
+  const quietIdx = args.indexOf("--attempt-quiet");
+  if (quietIdx !== -1) {
+    const parsed = parseDuration(args[quietIdx + 1] ?? "");
+    if (parsed !== null) attemptQuietMs = parsed;
+    else throw new Error(`invalid --attempt-quiet value: ${args[quietIdx + 1] ?? ""} (use forms like 30s, 2m)`);
+  }
+
+  return { maxIterations, maxDurationMs, interactive, goalMode, attemptMaxMs, attemptQuietMs };
 }
 
 /**
@@ -123,12 +177,32 @@ interface ProposerPromptArgs {
   priorHint?: string;
   proposalDirRel: string;
   proposalPathRel: string;
+  parents?: ParentAttempt[];
+  mutationDirective?: string;
+}
+
+function formatParents(parents: ParentAttempt[]): string {
+  if (parents.length === 0) return "(none)";
+  return parents
+    .map(
+      (p) =>
+        `- ${p.attempt_id} (score=${p.score ?? "null"}, ${p.outcome})${p.goal ? `\n    goal: ${p.goal.slice(0, 200)}` : ""}${p.rationale ? `\n    why: ${p.rationale.slice(0, 200)}` : ""}`,
+    )
+    .join("\n");
 }
 
 function buildProposerPrompt(a: ProposerPromptArgs): string {
   const hintBlock = a.priorHint
     ? `\nHINT FROM PRIOR HARNESS:\n${a.priorHint}\n\nYou may follow this hint or ignore it. It is the prior harness's\nsuggestion for where to focus next. If you ignore it, your hypothesis\nshould briefly say why.\n`
     : "\nHINT FROM PRIOR HARNESS:\n(none)\n";
+
+  const parentsBlock = a.parents && a.parents.length > 0
+    ? `\nPARENTS SELECTED BY STRATEGY (consider these specifically when mutating):\n${formatParents(a.parents)}\n`
+    : "";
+
+  const directiveBlock = a.mutationDirective && a.mutationDirective.trim().length > 0
+    ? `\nMUTATION DIRECTIVE FROM STRATEGY:\n${a.mutationDirective.trim()}\n`
+    : "";
 
   return `You are darwin's meta-proposer. Your job: write ONE new harness file
 that you believe will improve the score on this task.
@@ -148,7 +222,7 @@ CURRENT HARNESS (.darwin/harness/harness.mjs):
 \`\`\`javascript
 ${a.currentHarness}
 \`\`\`
-${hintBlock}
+${hintBlock}${parentsBlock}${directiveBlock}
 YOUR ACTIONS:
 - Read .darwin/evolution.jsonl and any .darwin/runs/*/ trajectories to
   understand what's been tried and what failed.
@@ -208,10 +282,12 @@ export async function meta(args: string[]): Promise<void> {
     }
   }
 
-  ensureBaselineHarness(cwd);
+  if (!opts.goalMode) {
+    ensureBaselineHarness(cwd);
+  }
 
   stderr.write(
-    `darwin: meta loop for "${spec.slug || "(unnamed)"}" — ${formatBound(opts)}\n`,
+    `darwin: meta loop for "${spec.slug || "(unnamed)"}" — ${formatBound(opts)} — ${opts.goalMode ? "goal-mode" : "harness-mode"}\n`,
   );
   stderr.write(
     `darwin: current frontier: ${front.attempt_id} (score=${front.score ?? "null"})\n`,
@@ -244,7 +320,9 @@ export async function meta(args: string[]): Promise<void> {
     const label = Number.isFinite(opts.maxIterations) ? `${i}/${opts.maxIterations}` : `${i}`;
     stderr.write(`\n=== iteration ${label} ===\n`);
 
-    const outcome = await runIteration(i, cwd, spec);
+    const outcome = opts.goalMode
+      ? await runGoalIteration(i, cwd, spec, opts)
+      : await runIteration(i, cwd, spec);
 
     // Stop: too many consecutive validation failures
     if (outcome === "rejected" || outcome === "failed") {
@@ -282,6 +360,59 @@ export async function meta(args: string[]): Promise<void> {
 
 type IterationOutcome = "scored" | "skipped" | "failed" | "rejected";
 
+/**
+ * Run updatePopulation hook (or default), persist results, log promotion.
+ * Returns whether the frontier moved.
+ */
+function applyPopulationUpdate(
+  cwd: string,
+  hooks: Harness | undefined,
+  ctx: StrategyContext,
+  attempt: { attempt_id: string; score: number | null; run_dir: string; knobs?: Record<string, string> },
+  postFrontierHook?: () => void,
+): { frontierMoved: boolean; nextFrontierScore: number | null } {
+  const cur = ctx.frontier;
+  const curNiches = readNiches(cwd);
+  const before: Population = curNiches ? { frontier: cur, niches: curNiches } : { frontier: cur };
+
+  const after = safeHook<Population>(
+    "updatePopulation",
+    hooks?.updatePopulation,
+    [attempt, before, ctx],
+    () => defaultUpdatePopulation(attempt, before, ctx),
+    isPopulation,
+  );
+
+  const frontierMoved = after.frontier.attempt_id !== cur.attempt_id;
+  if (frontierMoved) {
+    if (postFrontierHook) postFrontierHook();
+    writeFrontier(after.frontier, cwd);
+    stderr.write(
+      `darwin: new frontier ${after.frontier.attempt_id} (score ${after.frontier.score})\n`,
+    );
+  } else if (attempt.score !== null) {
+    stderr.write(
+      `darwin: ${attempt.attempt_id} did not improve frontier (${attempt.score} vs ${cur.score})\n`,
+    );
+  }
+
+  if (after.niches) writeNiches(after.niches, cwd);
+
+  return { frontierMoved, nextFrontierScore: after.frontier.score };
+}
+
+/**
+ * Load the current frontier harness (if it parses). Returns undefined if
+ * the harness file is missing or doesn't load — defaults will be used.
+ */
+async function loadFrontierHarness(cwd: string): Promise<Harness | undefined> {
+  try {
+    return await loadAndValidate(harnessPath(cwd));
+  } catch {
+    return undefined;
+  }
+}
+
 async function runIteration(
   i: number,
   cwd: string,
@@ -299,6 +430,24 @@ async function runIteration(
   const currentHarness = readFileSync(harnessPath(cwd), "utf-8");
   const priorHint = readLastEvolutionHint(cwd);
 
+  // Strategy: load current harness's hooks, build ctx, ask for parents + directive.
+  const frontierHooks = await loadFrontierHarness(cwd);
+  const ctx = buildContext({
+    iteration: i,
+    mode: "harness",
+    frontier: front,
+    history: readRecentEvolution(cwd, 50),
+    spec,
+  });
+  const parents = safeHook<ParentAttempt[]>(
+    "selectParents", frontierHooks?.selectParents, [ctx],
+    () => defaultSelectParents(ctx), isParentArray,
+  );
+  const mutationDirective = safeHook<string>(
+    "mutationDirective", frontierHooks?.mutationDirective, [ctx],
+    () => defaultMutationDirective(ctx), isString,
+  );
+
   const proposerPrompt = buildProposerPrompt({
     task,
     currentHarness,
@@ -307,6 +456,8 @@ async function runIteration(
     priorHint,
     proposalDirRel,
     proposalPathRel: proposalHarnessRel,
+    parents,
+    mutationDirective,
   });
 
   // 1. Propose
@@ -348,6 +499,27 @@ async function runIteration(
     return "rejected";
   }
   stderr.write("darwin: candidate validated\n");
+
+  // 2b. Strategy: ask the candidate harness whether to accept its own execution.
+  const accepted = safeHook<boolean>(
+    "acceptCandidate", harness.acceptCandidate, [harness, ctx],
+    () => defaultAcceptCandidate(harness, ctx), isBoolean,
+  );
+  if (!accepted) {
+    stderr.write(`darwin: candidate ${attemptId} rejected by strategy acceptCandidate hook\n`);
+    appendEvolution(
+      {
+        t: new Date().toISOString(),
+        attempt_id: attemptId,
+        score: null,
+        outcome: "rejected",
+        note: "rejected by strategy.acceptCandidate",
+        run_dir: proposalDirRel,
+      },
+      cwd,
+    );
+    return "rejected";
+  }
 
   // 3. Execute
   const runDir = join(cwd, DARWIN_DIR, RUNS_DIR, attemptId);
@@ -404,23 +576,223 @@ async function runIteration(
     cwd,
   );
 
-  // 7. Promote if improved
-  if (score !== null && (front2.score === null || score > front2.score)) {
-    copyFileSync(proposalHarness, harnessPath(cwd));
-    writeFrontier(
-      { attempt_id: attemptId, score, t, note, run_dir: runDirRel },
-      cwd,
-    );
-    stderr.write(
-      `darwin: new frontier ${attemptId} (score ${score}${delta !== undefined ? `, Δ ${delta >= 0 ? "+" : ""}${delta}` : ""})\n`,
-    );
-  } else if (score !== null) {
-    stderr.write(
-      `darwin: ${attemptId} did not improve frontier (${score} vs ${front2.score})\n`,
-    );
-  }
+  // 7. Strategy: update population (defaults to greedy frontier replace).
+  //    On frontier promotion, also copy candidate harness to active harness.
+  const updateCtx = buildContext({
+    iteration: i,
+    mode: "harness",
+    frontier: front2,
+    history: readRecentEvolution(cwd, 50),
+    spec,
+  });
+  applyPopulationUpdate(
+    cwd,
+    harness,
+    updateCtx,
+    { attempt_id: attemptId, score, run_dir: runDirRel },
+    () => copyFileSync(proposalHarness, harnessPath(cwd)),
+  );
 
   return outcome as IterationOutcome;
+}
+
+async function runGoalIteration(
+  i: number,
+  cwd: string,
+  spec: SpecSlice,
+  opts: LoopOptions,
+): Promise<IterationOutcome> {
+  const task = spec.task;
+  const attemptId = `iter-${i}`;
+  const runDir = join(cwd, DARWIN_DIR, RUNS_DIR, attemptId);
+  const runDirRel = `${RUNS_DIR}/${attemptId}`;
+  mkdirSync(runDir, { recursive: true });
+
+  const front = readFrontier(cwd)!;
+  const priorHint = readLastEvolutionHint(cwd);
+
+  // Strategy: harness hooks shape what the goal proposer sees.
+  // In goal-mode there isn't always a harness file, so hooks are optional;
+  // when absent, defaults give "recent 5" — same as before this change.
+  const frontierHooks = await loadFrontierHarness(cwd);
+  const ctx = buildContext({
+    iteration: i,
+    mode: "goal",
+    frontier: front,
+    history: readRecentEvolution(cwd, 50),
+    spec,
+  });
+  const parents = safeHook<ParentAttempt[]>(
+    "selectParents", frontierHooks?.selectParents, [ctx],
+    () => defaultSelectParents(ctx), isParentArray,
+  );
+  const mutationDirective = safeHook<string>(
+    "mutationDirective", frontierHooks?.mutationDirective, [ctx],
+    () => defaultMutationDirective(ctx), isString,
+  );
+
+  const recent = parents.filter((p) => p.attempt_id !== "baseline");
+
+  const proposerPrompt = buildGoalProposerPrompt({
+    task,
+    frontierAttempt: front.attempt_id,
+    frontierScore: front.score,
+    priorAttempts: recent,
+    priorHint: mutationDirective
+      ? `${priorHint ?? ""}${priorHint ? "\n\n" : ""}STRATEGY DIRECTIVE: ${mutationDirective}`
+      : priorHint,
+  });
+
+  // 1. Propose
+  let candidate: GoalCandidate;
+  try {
+    candidate = await invokeGoalProposer(proposerPrompt, cwd);
+  } catch (e) {
+    stderr.write(`darwin: goal proposer failed: ${e}\n`);
+    appendEvolution(
+      {
+        t: new Date().toISOString(),
+        attempt_id: attemptId,
+        score: null,
+        outcome: "failed",
+        note: `proposer error: ${String(e).slice(0, 200)}`,
+        run_dir: runDirRel,
+      },
+      cwd,
+    );
+    return "failed";
+  }
+
+  writeFileSync(join(runDir, "candidate.json"), JSON.stringify(candidate, null, 2) + "\n");
+  writeFileSync(join(runDir, "task.md"), task + "\n");
+
+  stderr.write(`\ndarwin: proposed goal:\n  ${candidate.goal}\n`);
+  if (candidate.rationale) stderr.write(`  rationale: ${candidate.rationale}\n`);
+  const knobLine = Object.entries(candidate.knobs)
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(", ");
+  if (knobLine) stderr.write(`  knobs: ${knobLine}\n`);
+
+  // 2a. Strategy: acceptCandidate hook (e.g. simulated annealing rejection).
+  const strategyAccepted = safeHook<boolean>(
+    "acceptCandidate", frontierHooks?.acceptCandidate, [candidate, ctx],
+    () => defaultAcceptCandidate(candidate, ctx), isBoolean,
+  );
+  if (!strategyAccepted) {
+    stderr.write(`darwin: candidate ${attemptId} rejected by strategy acceptCandidate hook\n`);
+    appendEvolution(
+      {
+        t: new Date().toISOString(),
+        attempt_id: attemptId,
+        score: null,
+        outcome: "rejected",
+        note: "rejected by strategy.acceptCandidate",
+        run_dir: runDirRel,
+        goal: candidate.goal,
+        rationale: candidate.rationale,
+      },
+      cwd,
+    );
+    return "rejected";
+  }
+
+  // 2b. HITL approval (BEFORE-execution). Always on in goal-mode for now.
+  const approved = await promptYesNo(
+    "\nrun this goal? [Y/n/skip] ",
+    true,
+  );
+  if (!approved) {
+    appendEvolution(
+      {
+        t: new Date().toISOString(),
+        attempt_id: attemptId,
+        score: null,
+        outcome: "rejected",
+        note: "user rejected proposed goal",
+        run_dir: runDirRel,
+        goal: candidate.goal,
+        rationale: candidate.rationale,
+      },
+      cwd,
+    );
+    return "rejected";
+  }
+
+  // 3. Execute via /goal
+  stderr.write("darwin: launching codex with /goal\n");
+  const result = await runGoalAttempt({
+    goal: candidate.goal,
+    cwd,
+    knobs: candidate.knobs,
+    maxDurationMs: opts.attemptMaxMs,
+    quietMs: opts.attemptQuietMs,
+    trajectoryPath: join(runDir, "trajectory.json"),
+  });
+  stderr.write(
+    `darwin: goal attempt finished (${result.exitReason}, ${Math.round(result.durationMs / 1000)}s, ${sumCounts(result.eventCounts)} events)\n`,
+  );
+
+  if (result.lastAssistantMessage) {
+    writeFileSync(join(runDir, "last_message.md"), result.lastAssistantMessage);
+  }
+
+  // 4. Score
+  const { score, note } = await scoreRun(spec.scorer, runDir);
+
+  // 5. Record
+  const t = new Date().toISOString();
+  const outcome = score === null ? "skipped" : "scored";
+  const front2 = readFrontier(cwd)!;
+  const delta = score !== null && front2.score !== null ? score - front2.score : undefined;
+
+  const knobsRecord: Record<string, string> = {};
+  for (const [k, v] of Object.entries(candidate.knobs)) {
+    if (typeof v === "string") knobsRecord[k] = v;
+  }
+
+  appendEvolution(
+    {
+      t,
+      attempt_id: attemptId,
+      score,
+      outcome,
+      note,
+      run_dir: runDirRel,
+      delta,
+      goal: candidate.goal,
+      rationale: candidate.rationale,
+      knobs: knobsRecord,
+      exit_reason: result.exitReason,
+      duration_s: Math.round(result.durationMs / 1000),
+    },
+    cwd,
+  );
+
+  // 6. Strategy: updatePopulation hook (defaults to greedy frontier replace).
+  const updateCtx = buildContext({
+    iteration: i,
+    mode: "goal",
+    frontier: front2,
+    history: readRecentEvolution(cwd, 50),
+    spec,
+  });
+  applyPopulationUpdate(
+    cwd,
+    frontierHooks,
+    updateCtx,
+    { attempt_id: attemptId, score, run_dir: runDirRel, knobs: knobsRecord },
+  );
+  // Silence unused: delta is informational; the helper prints its own line.
+  void delta;
+
+  return outcome as IterationOutcome;
+}
+
+function sumCounts(counts: Record<string, number>): number {
+  let total = 0;
+  for (const n of Object.values(counts)) total += n;
+  return total;
 }
 
 /**

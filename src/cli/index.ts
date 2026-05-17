@@ -49,8 +49,11 @@ usage:
   darwin init                    start a new meta-loop project (interview)
   darwin baseline                run the task once, record initial score
   darwin meta [--iterations N] [--duration 90s|30m|2h|1d] [--interactive]
+              [--goal-mode] [--attempt-max 30m] [--attempt-quiet 60s]
                                  propose → execute → score → repeat
                                  (default: unbounded; runs until user stops or proposer stuck)
+                                 --goal-mode: use Codex /goal as the attempt primitive
+                                              (proposer outputs goal+knobs instead of a harness)
   darwin setup                   (re)install .codex/hooks.json
   darwin hook <event>            handler invoked by .codex/hooks.json
 `);

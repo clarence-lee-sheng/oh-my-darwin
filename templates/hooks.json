@@ -1,5 +1,7 @@
 {
-  "pre_tool_use":  "darwin-hook pre_tool_use",
-  "post_tool_use": "darwin-hook post_tool_use",
-  "on_stop":       "darwin-hook on_stop"
+  "pre_tool_use":       "darwin-hook pre_tool_use",
+  "post_tool_use":      "darwin-hook post_tool_use",
+  "session_start":      "darwin-hook session_start",
+  "user_prompt_submit": "darwin-hook user_prompt_submit",
+  "stop":               "darwin-hook stop"
 }

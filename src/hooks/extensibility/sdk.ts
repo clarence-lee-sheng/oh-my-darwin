@@ -8,7 +8,12 @@ export type LifecycleEvent =
   | "run_end"
   | "pre_tool_use"
   | "post_tool_use"
-  | "on_stop"
+  | "permission_request"
+  | "pre_compact"
+  | "post_compact"
+  | "session_start"
+  | "user_prompt_submit"
+  | "stop"
   | (string & {}); // open set; Codex may add more
 
 export type HookPayload = Record<string, unknown>;

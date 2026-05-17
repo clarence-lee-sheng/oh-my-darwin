@@ -22,6 +22,38 @@ export interface EvolutionRow {
    * Used by darwin meta to seed the next proposer prompt.
    */
   next_hint?: string;
+  /** Optional (goal-mode): the goal statement the proposer chose for this attempt. */
+  goal?: string;
+  /** Optional (goal-mode): the proposer's rationale for this goal. */
+  rationale?: string;
+  /** Optional (goal-mode): execution knobs used (model, sandbox, approval). */
+  knobs?: Record<string, string>;
+  /** Optional (goal-mode): why the attempt finished (quiet/time_cap/codex_exit/error). */
+  exit_reason?: string;
+  /** Optional (goal-mode): attempt duration in seconds. */
+  duration_s?: number;
+}
+
+/**
+ * Read the most recent N attempts from evolution.jsonl, newest last.
+ * Returns []  if no file. Malformed lines are skipped silently.
+ */
+export function readRecentEvolution(
+  cwd: string,
+  n: number,
+): EvolutionRow[] {
+  const p = evolutionPath(cwd);
+  if (!existsSync(p)) return [];
+  const lines = readFileSync(p, "utf-8").trim().split("\n").filter(Boolean);
+  const rows: EvolutionRow[] = [];
+  for (const line of lines.slice(-n)) {
+    try {
+      rows.push(JSON.parse(line) as EvolutionRow);
+    } catch {
+      /* skip */
+    }
+  }
+  return rows;
 }
 
 function evolutionPath(cwd: string): string {
