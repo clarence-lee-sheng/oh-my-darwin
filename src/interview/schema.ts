@@ -1,6 +1,6 @@
 /**
  * JSON Schema for the per-turn envelope returned by the interviewer.
- * Passed to `codex exec --output-schema <file>` so Codex enforces the
+ * Passed to `<engine> exec --output-schema <file>` so the agent enforces the
  * shape — no scraping, no markers, no brittle parsing.
  */
 export const ENVELOPE_SCHEMA = {

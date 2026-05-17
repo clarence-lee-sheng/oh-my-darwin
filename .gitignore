@@ -1,6 +1,7 @@
-# darwin / Codex local state
+# darwin / agent local state
 .darwin/
 .codex/
+.omx/
 
 # Node
 node_modules/
@@ -8,3 +9,5 @@ dist/
 *.log
 .DS_Store
 .env
+
+make_money_v4

@@ -6,7 +6,7 @@
 
 The Stanford meta-harness pattern (propose harness variant → validate → evaluate → keep frontier → repeat) is powerful but inaccessible — using it today requires writing `meta_harness.py` from scratch, designing a benchmark, and wiring an evaluator. oh-my-darwin's product is the **on-ramp**: a guided interview turns "I have a task" into a runnable meta-loop spec, then a small set of commands drives the loop and surfaces progress.
 
-oh-my-darwin is built as a wrapper around the **Codex CLI**, structurally inspired by `oh-my-codex` (hook bridge, dispatcher, plugin SDK). Codex is the execution engine; oh-my-darwin is the on-ramp and the loop driver on top.
+oh-my-darwin is built as a wrapper around **OMX (`oh-my-codex`)** and the **Codex CLI**, structurally inspired by `oh-my-codex` (hook bridge, dispatcher, plugin SDK). The default execution engine is `omx --madmax --xhigh`, with automatic fallback to Codex yolo mode (`codex --dangerously-bypass-approvals-and-sandbox`) when OMX cannot launch; oh-my-darwin is the on-ramp and the loop driver on top.
 
 ## Who uses this and why
 
@@ -16,7 +16,7 @@ A user with a specific task they wish an LLM could do well, who:
 - Isn't going to read the meta-harness paper or write the loop themselves
 - Will type `darwin init` if it promises to set the whole thing up
 
-Personas include indie hackers running recurring tasks, researchers wanting to apply meta-harness to their benchmark without reimplementing, power users hitting Codex's ceiling, and domain experts whose tasks Codex *almost* solves reliably.
+Personas include indie hackers running recurring tasks, researchers wanting to apply meta-harness to their benchmark without reimplementing, power users hitting Codex's ceiling, and domain experts whose tasks Codex/OMX *almost* solves reliably.
 
 ## Two example tasks that anchor the design
 
@@ -64,7 +64,7 @@ Per-project state, no global anything (except an optional registry).
 ├── strategies/           # proposer outputs (Phase 1 plans, when applicable)
 ├── runs/<run-id>/        # per-execution trajectories, artifacts, receipts
 ├── plugins/              # opt-in user/community plugins (rarely needed)
-└── (codex hook config lives in sibling .codex/hooks.json)
+└── (agent hook config lives in sibling .codex/hooks.json)
 
 ~/.darwin/
 └── projects.json         # optional convenience index; rebuildable from FS
@@ -83,12 +83,12 @@ Five new commands, in priority order. Each ships independently useful behavior.
 
 ### 1. `darwin init` — the interviewer  *(first deliverable, ~70% of product value)*
 
-Conducts an **adaptive Socratic interview** (Ouroboros-inspired) that produces `.darwin/meta-spec.md`. Uses Codex as the engine (dogfoods our own bridge).
+Conducts an **adaptive Socratic interview** (Ouroboros-inspired) that produces `.darwin/meta-spec.md`. Uses the selected engine — `omx --madmax --xhigh` by default, `codex --dangerously-bypass-approvals-and-sandbox` on fallback or explicit Codex request — to dogfood the bridge.
 
 **Behavior:**
 
 1. Scan the project (cwd): list files, read README, `package.json`/`pyproject.toml`, last 10 git commits if a repo. Pass as context to the interviewer.
-2. Spawn Codex with the interviewer system prompt + brownfield context.
+2. Spawn the selected engine with the interviewer system prompt + brownfield context.
 3. Conduct an adaptive interview across these dimensions, until each is "clear enough":
    - **Task** — what does the user want done; what does success concretely look like?
    - **Scorer** — how does an iteration get a number? Human-reported / command-output-parsed / LLM-judge / test-pass.
@@ -116,7 +116,7 @@ Single command that orchestrates the full propose → validate → execute → s
 
 1. Read `frontier.json` + recent `evolution.jsonl` + tail of `events.jsonl`.
 2. Build proposer prompt (slots: metric, frontier, history, hypothesis-ask).
-3. Invoke proposer harness (Codex initially) — outputs one candidate manifest to `.darwin/proposals/<name>.json`.
+3. Invoke proposer harness (selected engine initially) — outputs one candidate manifest to `.darwin/proposals/<name>.json`.
 4. Validate manifest (schema; respects spec constraints).
 5. **If HITL pattern includes pre-execution approval:** show user the proposal; wait for approval/edit/reject.
 6. Execute the candidate against the task. Enforce hard constraints (budget kill, time kill).
@@ -135,6 +135,20 @@ Supports `--project <path>` to inspect any project without `cd`.
 
 Lists known projects from `~/.darwin/projects.json` (lazily updated on `init`/`run`). Shows path, task one-liner, last activity. Regeneratable by `darwin list --rescan ~/`.
 
+### 6. Project capabilities — local skills and safe hooks
+
+`darwin meta` may now stage a `capability-manifest.json` next to a proposed
+harness. The first supported capability types are deliberately narrow:
+
+- **Project-scoped Codex skills**: promoted to `.agents/skills/<name>/SKILL.md`.
+- **Project-scoped Codex hooks**: promoted into `.codex/hooks.json` only when
+  the command is the stable `darwin-hook <event>` dispatcher.
+
+Darwin stores ownership both locally (`.darwin/ownership/*.json`) and globally
+(`~/.darwin/projects/<project-id>/capabilities.json`). Generated skills/hooks
+are auto-promoted after validation, but are only advertised to the proposer on
+the next iteration.
+
 ## Architecture (already built, unchanged)
 
 The wrapping mechanism is identical to what we already have. Five new commands plug into the same substrate.
@@ -151,7 +165,7 @@ oh-my-darwin/
     ├── cli/
     │   ├── index.ts              # entry: routes subcommands
     │   ├── setup.ts              # ensureHooks() + setup()
-    │   ├── run.ts                # passthrough launch of codex
+    │   ├── run.ts                # passthrough launch of selected engine
     │   ├── hook.ts               # invoked by .codex/hooks.json
     │   ├── constants.ts
     │   ├── init.ts               # NEW — Socratic interviewer
@@ -160,7 +174,7 @@ oh-my-darwin/
     │   ├── status.ts             # NEW — read-only visibility
     │   └── list.ts               # NEW — multi-project index
     ├── runtime/
-    │   ├── bridge.ts             # spawn codex; today inherit-stdio
+    │   ├── bridge.ts             # spawn selected engine; today inherit-stdio
     │   └── run-loop.ts           # lifecycle owner; emits events
     ├── hooks/extensibility/
     │   ├── dispatcher.ts         # single fan-out; built-in JSONL observer
@@ -250,9 +264,10 @@ To stay scoped:
 
 - No tmux panes, no HUD, no visual dashboards
 - No MCP server, no persistent shared memory across sessions
-- No multi-agent teams (parallel Codex sessions coordinating)
-- No skill DSL, prompt library, or workflow templates
-- No multi-harness adapters (Claude Code etc.) — Codex only
+- No multi-agent teams (parallel agent sessions coordinating)
+- No global skill DSL, prompt marketplace, or agent system. The only accepted
+  skill artifact is a project-scoped Codex-compatible `SKILL.md`.
+- No multi-harness adapters beyond Codex and OMX launch selection (Claude Code etc. remain out of scope)
 - No plugin marketplace, no community plugin catalog
 - No cross-project intelligence (each project is isolated)
 - No team mode, no auth, no cloud
@@ -287,8 +302,8 @@ The build is "done enough to move on" when:
 
 ## Open questions (resolve during build)
 
-- Real Codex hook event names — verify `pre_tool_use` / `post_tool_use` / `on_stop` against actual docs before relying on them in `events.jsonl`.
+- Real Codex/OMX hook event names — verify `pre_tool_use` / `post_tool_use` / `on_stop` against actual docs before relying on them in `events.jsonl`.
 - Whether to switch `runtime/bridge.ts` from `stdio: "inherit"` to piped IO (needed for plugin-based steering; not needed for the v1 on-ramp).
-- Where the proposer harness lives long-term. v1 uses Codex (already wired). Some tasks may benefit from Claude Code as proposer with Codex as executor; defer until felt.
+- Where the proposer harness lives long-term. v1 uses the selected Codex/OMX engine (already wired). Some tasks may benefit from Claude Code as proposer with Codex/OMX as executor; defer until felt.
 - Whether `meta-spec.md` should be immutable after first creation (Ouroboros style) or freely editable (oh-my-darwin default). Leaning editable for the on-ramp audience.
 - Budget tracking for tasks that spend real money: relies on user honesty in v1 (they report spend); proper integration with Stripe/etc. is v2+.

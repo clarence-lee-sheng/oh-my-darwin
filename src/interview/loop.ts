@@ -12,11 +12,20 @@ import { scanBrownfield } from "./brownfield.js";
 import { buildSystemPrompt } from "./prompt.js";
 import { callInterviewer, type Turn } from "./codex-call.js";
 import { meanAmbiguity, type Envelope } from "./schema.js";
+import {
+  DEFAULT_ENGINE,
+  engineLabel,
+  resolveEngineArgs,
+  type EngineName,
+} from "../runtime/engine.js";
 
 const MAX_TURNS = 15;
 const AMBIGUITY_THRESHOLD = 0.2;
 
-export async function runInterview(): Promise<void> {
+export async function runInterview(
+  engine: EngineName = DEFAULT_ENGINE,
+  engineArgs: string[] = resolveEngineArgs(engine),
+): Promise<void> {
   const cwd = process.cwd();
   const darwinDir = join(cwd, DARWIN_DIR);
   const initDir = join(darwinDir, INIT_DIR);
@@ -43,10 +52,10 @@ export async function runInterview(): Promise<void> {
   let forcedDone = false;
 
   try {
-    stderr.write("darwin: starting interview (Codex)\n");
+    stderr.write(`darwin: starting interview (${engineLabel(engine)})\n`);
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       stderr.write(`\ndarwin: thinking (turn ${turn + 1})...\n`);
-      const env = await callInterviewer(systemPrompt, history);
+      const env = await callInterviewer(systemPrompt, history, engine, engineArgs);
       lastEnv = env;
 
       // Persist progress every turn so ^C leaves a useful draft.

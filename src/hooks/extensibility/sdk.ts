@@ -14,7 +14,8 @@ export type LifecycleEvent =
   | "session_start"
   | "user_prompt_submit"
   | "stop"
-  | (string & {}); // open set; Codex may add more
+  | "on_stop"
+  | (string & {}); // open set; Codex/OMX may add more
 
 export type HookPayload = Record<string, unknown>;
 
