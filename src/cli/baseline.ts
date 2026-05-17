@@ -1,9 +1,9 @@
-import readline from "node:readline/promises";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { stdin, stdout, stderr } from "node:process";
+import { stderr } from "node:process";
 import { spawnCodex } from "../runtime/bridge.js";
 import { readSpec } from "../spec/parse.js";
+import { scoreRun } from "../scorer/index.js";
 import { writeFrontier } from "../state/frontier.js";
 import { appendEvolution } from "../state/history.js";
 import {
@@ -15,9 +15,9 @@ import {
 /**
  * Run the task described in .darwin/meta-spec.md once, no proposer
  * in play, to establish a starting score. Spawns Codex interactively
- * with the task as the initial prompt; on Codex exit, prompts the
- * user for a realized score; writes frontier.json + one evolution
- * row + a runs/baseline/ directory with the task prompt for the record.
+ * with the task as the initial prompt; on Codex exit, dispatches to
+ * the scorer declared in the spec; writes frontier.json + one
+ * evolution row + a runs/baseline/ directory.
  */
 export async function baseline(): Promise<void> {
   const cwd = process.cwd();
@@ -35,6 +35,7 @@ export async function baseline(): Promise<void> {
 
   stderr.write(`darwin: baseline run for "${spec.slug || "(unnamed)"}"\n`);
   stderr.write(`darwin: task →\n  ${spec.task.split("\n").join("\n  ")}\n\n`);
+  stderr.write(`darwin: scorer source = ${spec.scorer.source}\n`);
   stderr.write("darwin: launching codex (interactive)\n");
 
   const startedAt = Date.now();
@@ -46,27 +47,8 @@ export async function baseline(): Promise<void> {
     `\ndarwin: codex exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
   );
 
-  // Capture realized score + optional note.
-  const rl = readline.createInterface({ input: stdin, output: stdout });
-  let score: number | null = null;
-  let note: string | undefined;
-  try {
-    const raw = (await rl.question("realized score? (number, blank to skip) > ")).trim();
-    if (raw.length > 0) {
-      const parsed = Number(raw);
-      if (Number.isNaN(parsed)) {
-        stderr.write(
-          `darwin: '${raw}' is not a number; recording attempt as skipped\n`,
-        );
-      } else {
-        score = parsed;
-      }
-    }
-    const n = (await rl.question("note? (optional, single line) > ")).trim();
-    if (n.length > 0) note = n;
-  } finally {
-    rl.close();
-  }
+  // Dispatch to the spec-declared scorer.
+  const { score, note } = await scoreRun(spec.scorer, runDir);
 
   const t = new Date().toISOString();
   const outcome = score === null ? "skipped" : "scored";
