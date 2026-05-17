@@ -3,8 +3,8 @@
 The on-ramp to meta-harness for non-researchers. Turn "I have a task" into an iterative loop, without writing your own propose/evaluate/score machinery.
 
 Built on top of OMX (`oh-my-codex`) and the Codex CLI. Darwin defaults to
-`omx --madmax --xhigh` and falls back to plain `codex` when OMX is not
-available. See `darwin_spec.md` for the full design rationale.
+`omx --madmax --xhigh` and falls back to Codex yolo mode
+(`codex --dangerously-bypass-approvals-and-sandbox`) when OMX is not available. See `darwin_spec.md` for the full design rationale.
 
 ## Quick start
 
@@ -18,16 +18,18 @@ darwin baseline # uses omx --madmax --xhigh; captures starting score
 # (darwin meta — the iterative loop — coming next)
 ```
 
-To force raw Codex instead:
+To force Codex instead (also yolo by default):
 
 ```bash
 darwin --codex baseline
 DARWIN_ENGINE=codex darwin meta
+# override yolo by providing explicit Codex flags:
+darwin --codex --sandbox read-only baseline
 ```
 
 ## Commands today
 
-- **`darwin`** — auto-installs `.codex/hooks.json` if missing, then launches the selected agent engine (`omx --madmax --xhigh` by default, fallback to `codex` if OMX cannot launch). Every lifecycle event is logged to `.darwin/events.jsonl`.
+- **`darwin`** — auto-installs `.codex/hooks.json` if missing, then launches the selected agent engine (`omx --madmax --xhigh` by default, fallback to `codex --dangerously-bypass-approvals-and-sandbox` if OMX cannot launch). Every lifecycle event is logged to `.darwin/events.jsonl`.
 - **`darwin init`** — adaptive Socratic interview (via the selected engine) that produces `.darwin/meta-spec.md`: task, scorer, constraints, HITL pattern, optimization surface, stop condition.
 - **`darwin baseline`** — reads the spec, launches the selected engine interactively with the task as the initial prompt, prompts you for a realized score on exit, writes `.darwin/frontier.json` and appends to `.darwin/evolution.jsonl`.
 - **`darwin setup`** — explicit (re)install of `.codex/hooks.json`.
@@ -42,7 +44,7 @@ darwin "fix the failing tests"      # omx --madmax --xhigh
 darwin baseline                     # omx --madmax --xhigh
 ```
 
-Codex can be selected per invocation or through the environment:
+Codex can be selected per invocation or through the environment. With no explicit engine args, Codex uses its yolo-equivalent bypass flag:
 
 ```bash
 darwin --codex "fix the failing tests"
@@ -52,8 +54,8 @@ DARWIN_ENGINE=codex darwin init
 
 For subcommands that spawn agents internally (`init`, `baseline`, `meta`),
 prepend engine launch flags either before the subcommand or with
-`DARWIN_ENGINE_ARGS`. If you provide no engine args for OMX, Darwin uses
-`--madmax --xhigh`:
+`DARWIN_ENGINE_ARGS`. If you provide no engine args, Darwin uses
+`--madmax --xhigh` for OMX and `--dangerously-bypass-approvals-and-sandbox` for Codex:
 
 ```bash
 darwin --omx --madmax --xhigh baseline
@@ -63,8 +65,8 @@ DARWIN_ENGINE=omx DARWIN_ENGINE_ARGS="--madmax --xhigh" darwin meta
 When using OMX, Darwin defaults `OMX_LAUNCH_POLICY=direct` for child processes so
 `baseline`/`meta` can wait for the interactive agent to exit and then ask for the
 score. Explicit OMX flags such as `--tmux` still override that default. If the
-`omx` executable is missing or cannot be launched, Darwin retries with plain
-`codex` and does not pass OMX-only flags to the fallback.
+`omx` executable is missing or cannot be launched, Darwin retries with Codex yolo mode
+and does not pass OMX-only flags to the fallback.
 
 ## What's coming
 

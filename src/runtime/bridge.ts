@@ -5,6 +5,7 @@ import {
   fallbackEngine,
   fallbackNotice,
   isEngineLaunchError,
+  resolveEngineArgs,
   type EngineName,
 } from "./engine.js";
 
@@ -37,7 +38,10 @@ export function spawnEngine(
       const fallback = fallbackEngine(engine);
       if (fallback && isEngineLaunchError(err)) {
         process.stderr.write(fallbackNotice(engine, fallback, err));
-        spawnEngine(fallback, args, { cwd: options.cwd }).exitInfo.then(
+        spawnEngine(fallback, args, {
+          cwd: options.cwd,
+          engineArgs: resolveEngineArgs(fallback),
+        }).exitInfo.then(
           resolve,
           reject,
         );

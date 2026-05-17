@@ -42,7 +42,12 @@ export async function callInterviewer(
     const fallback = fallbackEngine(engine);
     if (fallback && isEngineLaunchError(err)) {
       process.stderr.write(fallbackNotice(engine, fallback, err));
-      return callInterviewerOnce(systemPrompt, history, fallback, []);
+      return callInterviewerOnce(
+        systemPrompt,
+        history,
+        fallback,
+        resolveEngineArgs(fallback),
+      );
     }
     throw err;
   }

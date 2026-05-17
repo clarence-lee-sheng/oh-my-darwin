@@ -120,11 +120,13 @@ engine selection:
 
 defaults:
   omx --madmax --xhigh           used when no engine/args are selected
-  codex                          fallback when omx cannot launch
+  codex --dangerously-bypass-approvals-and-sandbox
+                                 used for explicit codex and omx fallback
 
 examples:
   darwin baseline
   darwin --codex baseline
+  darwin --codex --sandbox read-only baseline
   DARWIN_ENGINE=omx DARWIN_ENGINE_ARGS="--madmax --xhigh" darwin meta
 
 selected/default engine: ${engineLabel(engine)}

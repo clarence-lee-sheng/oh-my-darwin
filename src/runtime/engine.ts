@@ -2,6 +2,9 @@ export type EngineName = "codex" | "omx";
 
 export const DEFAULT_ENGINE: EngineName = "omx";
 export const DEFAULT_OMX_ARGS = ["--madmax", "--xhigh"] as const;
+export const DEFAULT_CODEX_ARGS = [
+  "--dangerously-bypass-approvals-and-sandbox",
+] as const;
 
 export interface EngineSelection {
   engine: EngineName;
@@ -33,7 +36,8 @@ function parseEngineName(raw: string | undefined): EngineName {
  *   DARWIN_ENGINE=omx darwin baseline
  *
  * If no engine is selected, Darwin defaults to `omx --madmax --xhigh`.
- * If OMX cannot be launched, call sites fall back to plain `codex`.
+ * If OMX cannot be launched, call sites fall back to Codex's yolo-equivalent
+ * `codex --dangerously-bypass-approvals-and-sandbox`.
  */
 export function extractEngineSelection(argv: string[]): EngineSelection {
   let explicitEngine: string | undefined;
@@ -101,7 +105,7 @@ export function extractEngineSelection(argv: string[]): EngineSelection {
 }
 
 export function defaultEngineArgs(engine: EngineName): string[] {
-  return engine === "omx" ? [...DEFAULT_OMX_ARGS] : [];
+  return engine === "omx" ? [...DEFAULT_OMX_ARGS] : [...DEFAULT_CODEX_ARGS];
 }
 
 export function resolveEngineArgs(
@@ -167,7 +171,7 @@ export function fallbackNotice(
     ? (err as NodeJS.ErrnoException).code
     : undefined;
   const detail = code ? ` (${code})` : "";
-  return `darwin: ${engineCommand(engine)} could not launch${detail}; falling back to ${engineCommand(fallback)}\n`;
+  return `darwin: ${engineCommand(engine)} could not launch${detail}; falling back to ${formatEngineCommand(fallback, resolveEngineArgs(fallback))}\n`;
 }
 
 function splitArgs(raw: string): string[] {

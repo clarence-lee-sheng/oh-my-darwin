@@ -36,7 +36,12 @@ export async function invokeProposer(
     const fallback = fallbackEngine(engine);
     if (fallback && isEngineLaunchError(err)) {
       process.stderr.write(fallbackNotice(engine, fallback, err));
-      return invokeProposerOnce(promptText, expectedOutputPath, fallback, []);
+      return invokeProposerOnce(
+        promptText,
+        expectedOutputPath,
+        fallback,
+        resolveEngineArgs(fallback),
+      );
     }
     throw err;
   }
