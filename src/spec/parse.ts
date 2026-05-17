@@ -111,11 +111,11 @@ export function extractScorer(md: string): ScorerSpec {
 
   const fields: Record<string, string> = {};
   for (const line of body.split("\n")) {
-    const m = line.match(/^\s*-\s*([a-zA-Z_]+)\s*:\s*(.+?)\s*$/);
-    if (m) fields[m[1].toLowerCase()] = m[2];
+    const m = line.match(/^\s*-\s*([^:]+?)\s*:\s*(.*?)\s*$/);
+    if (m) fields[normalizeKey(m[1])] = m[2].trim();
   }
 
-  const source = normalizeSource(fields.source);
+  const source = normalizeSource(fields.source, fields);
   const direction = normalizeDirection(fields.direction);
 
   const spec: ScorerSpec = { source, direction };
@@ -138,18 +138,75 @@ export function extractScorer(md: string): ScorerSpec {
   return spec;
 }
 
-function normalizeSource(s?: string): ScorerSource {
-  const v = (s ?? "").trim().toLowerCase();
-  if (v === "command") return "command";
-  if (v === "test-suite" || v === "test_suite" || v === "tests") return "test-suite";
-  if (v === "llm-judge" || v === "llm_judge" || v === "judge") return "llm-judge";
+function normalizeKey(key: string): string {
+  const normalized = key.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const aliases: Record<string, string> = {
+    verification: "source",
+    verification_mode: "source",
+    verification_source: "source",
+    verifier: "source",
+    scorer_source: "source",
+    score_source: "source",
+    scoring_mode: "source",
+    metric_source: "source",
+    mode: "source",
+    metric_direction: "direction",
+    optimization: "direction",
+    objective: "direction",
+    parse_rule: "parse",
+    output_parse: "parse",
+    output_parser: "parse",
+    score_command: "command",
+    test_command: "command",
+    rubric: "rubric_path",
+    artifact: "artifact_path",
+  };
+  return aliases[normalized] ?? normalized;
+}
+
+function normalizeSource(s: string | undefined, fields: Record<string, string>): ScorerSource {
+  const raw = (s ?? "").trim();
+  const v = raw.toLowerCase().replace(/[\s_]+/g, "-");
+  if (!raw || raw.startsWith("<")) {
+    if (fields.command) {
+      return looksLikeTestSuite(fields) ? "test-suite" : "command";
+    }
+    if (fields.rubric_path || fields.artifact_path) return "llm-judge";
+    return "human";
+  }
+
+  if (v === "human" || v === "manual" || v === "human-reported" || v === "human-verification") {
+    return "human";
+  }
+  if (v === "command" || v === "shell" || v === "script" || v === "cli" || v === "automated" || v === "automatic") {
+    return "command";
+  }
+  if (
+    v === "test-suite" ||
+    v === "tests" ||
+    v === "test" ||
+    v === "test-pass" ||
+    v === "test-pass-rate" ||
+    v === "unit-tests" ||
+    v === "ci"
+  ) {
+    return "test-suite";
+  }
+  if (v === "llm-judge" || v === "llm" || v === "judge" || v === "ai-judge" || v === "model-judge" || v === "rubric") {
+    return "llm-judge";
+  }
   return "human";
 }
 
 function normalizeDirection(s?: string): ScorerDirection {
-  const v = (s ?? "").trim().toLowerCase();
-  if (v === "lower_is_better" || v === "lower" || v === "min") return "lower_is_better";
+  const v = (s ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (v === "lower_is_better" || v === "lower" || v === "min" || v === "minimize") return "lower_is_better";
   return "higher_is_better";
+}
+
+function looksLikeTestSuite(fields: Record<string, string>): boolean {
+  const haystack = `${fields.name ?? ""} ${fields.command ?? ""}`.toLowerCase();
+  return /\b(test|tests|pytest|vitest|jest|node --test|npm test|pnpm test|yarn test)\b/.test(haystack);
 }
 
 function parseNumber(s?: string): number | null {

@@ -9,3 +9,5 @@ dist/
 *.log
 .DS_Store
 .env
+
+make_money_v4

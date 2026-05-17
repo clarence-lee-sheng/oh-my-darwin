@@ -9,7 +9,8 @@
   },
   "files": [
     "dist",
-    "templates"
+    "templates",
+    ".agents"
   ],
   "scripts": {
     "build": "tsc",

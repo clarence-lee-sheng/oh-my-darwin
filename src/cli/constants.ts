@@ -2,13 +2,13 @@
 // wrapper CLI, but its lifecycle hooks are still registered through .codex.
 export const HOOKS_DIR = ".codex";
 export const HOOKS_FILE = "hooks.json";
+export const AGENTS_DIR = ".agents";
 export const DARWIN_DIR = ".darwin";
 export const EVENTS_LOG = "events.jsonl";
 export const PLUGINS_DIR = "plugins";
 export const PROJECT_FILE = "project.json";
 
 // Project-scoped Codex skills.
-export const AGENTS_DIR = ".agents";
 export const SKILLS_DIR = "skills";
 export const SKILL_FILE = "SKILL.md";
 
