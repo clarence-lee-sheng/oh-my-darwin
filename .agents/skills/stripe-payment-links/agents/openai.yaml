@@ -1,0 +1,4 @@
+interface:
+  display_name: "Stripe Payment Links"
+  short_description: "Create and monitor Stripe payment links"
+  default_prompt: "Use $stripe-payment-links to create Stripe Payment Links and check whether payments have completed."
