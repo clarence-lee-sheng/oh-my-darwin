@@ -5,6 +5,9 @@ import { runHook } from "./hook.js";
 import { init } from "./init.js";
 import { baseline } from "./baseline.js";
 import { meta } from "./meta.js";
+import { status } from "./status.js";
+import { projects } from "./projects.js";
+import { capabilities } from "./capabilities.js";
 import {
   engineLabel,
   extractEngineSelection,
@@ -16,6 +19,10 @@ const SUBCOMMANDS = new Set([
   "init",
   "baseline",
   "meta",
+  "status",
+  "projects",
+  "list",
+  "capabilities",
   "setup",
   "hook",
   "--help",
@@ -48,6 +55,16 @@ async function main(): Promise<void> {
       return;
     case "meta":
       await meta(rest, engine, engineArgs);
+      return;
+    case "status":
+      status();
+      return;
+    case "projects":
+    case "list":
+      projects();
+      return;
+    case "capabilities":
+      capabilities();
       return;
     case "setup":
       setup();
@@ -107,6 +124,9 @@ usage:
   darwin meta [--iterations N] [--duration 90s|30m|2h|1d] [--interactive]
                                  propose → execute → score → repeat
                                  (default: unbounded; runs until user stops or proposer stuck)
+  darwin status                  show project/frontier/capability status
+  darwin projects                list ~/.darwin registered projects
+  darwin capabilities            list active/stale project capabilities
   darwin setup                   (re)install .codex/hooks.json
   darwin hook <event>            handler invoked by .codex/hooks.json
 
