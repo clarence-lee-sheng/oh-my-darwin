@@ -1,8 +1,13 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
+  DEFAULT_ENGINE,
   engineCommand,
   engineEnv,
+  fallbackEngine,
+  fallbackNotice,
+  isEngineLaunchError,
+  resolveEngineArgs,
   type EngineName,
 } from "../runtime/engine.js";
 
@@ -17,8 +22,31 @@ import {
 export async function invokeProposer(
   promptText: string,
   expectedOutputPath: string,
-  engine: EngineName = "codex",
-  engineArgs: string[] = [],
+  engine: EngineName = DEFAULT_ENGINE,
+  engineArgs: string[] = resolveEngineArgs(engine),
+): Promise<void> {
+  try {
+    return await invokeProposerOnce(
+      promptText,
+      expectedOutputPath,
+      engine,
+      engineArgs,
+    );
+  } catch (err) {
+    const fallback = fallbackEngine(engine);
+    if (fallback && isEngineLaunchError(err)) {
+      process.stderr.write(fallbackNotice(engine, fallback, err));
+      return invokeProposerOnce(promptText, expectedOutputPath, fallback, []);
+    }
+    throw err;
+  }
+}
+
+async function invokeProposerOnce(
+  promptText: string,
+  expectedOutputPath: string,
+  engine: EngineName,
+  engineArgs: string[],
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(engineCommand(engine), [...engineArgs, promptText], {

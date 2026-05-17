@@ -2,12 +2,16 @@ import { spawn, type ChildProcess } from "node:child_process";
 import {
   engineCommand,
   engineEnv,
+  fallbackEngine,
+  fallbackNotice,
+  isEngineLaunchError,
   type EngineName,
 } from "./engine.js";
 
 export interface SpawnResult {
   child: ChildProcess;
   exit: Promise<number>;
+  exitInfo: Promise<{ engine: EngineName; code: number }>;
 }
 
 /**
@@ -28,11 +32,23 @@ export function spawnEngine(
     cwd: options.cwd,
     env: engineEnv(engine),
   });
-  const exit = new Promise<number>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code) => resolve(code ?? 0));
+  const exitInfo = new Promise<{ engine: EngineName; code: number }>((resolve, reject) => {
+    child.once("error", (err) => {
+      const fallback = fallbackEngine(engine);
+      if (fallback && isEngineLaunchError(err)) {
+        process.stderr.write(fallbackNotice(engine, fallback, err));
+        spawnEngine(fallback, args, { cwd: options.cwd }).exitInfo.then(
+          resolve,
+          reject,
+        );
+        return;
+      }
+      reject(err);
+    });
+    child.once("exit", (code) => resolve({ engine, code: code ?? 0 }));
   });
-  return { child, exit };
+  const exit = exitInfo.then((info) => info.code);
+  return { child, exit, exitInfo };
 }
 
 /** Backward-compatible helper for the original Codex-only call sites. */

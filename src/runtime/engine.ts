@@ -1,5 +1,8 @@
 export type EngineName = "codex" | "omx";
 
+export const DEFAULT_ENGINE: EngineName = "omx";
+export const DEFAULT_OMX_ARGS = ["--madmax", "--xhigh"] as const;
+
 export interface EngineSelection {
   engine: EngineName;
   args: string[];
@@ -7,7 +10,7 @@ export interface EngineSelection {
 }
 
 function parseEngineName(raw: string | undefined): EngineName {
-  const value = (raw ?? process.env.DARWIN_ENGINE ?? "codex")
+  const value = (raw ?? process.env.DARWIN_ENGINE ?? DEFAULT_ENGINE)
     .trim()
     .toLowerCase();
 
@@ -25,8 +28,12 @@ function parseEngineName(raw: string | undefined): EngineName {
  * Supported forms:
  *   darwin --engine omx init
  *   darwin init --engine=omx
- *   darwin --omx --high
+ *   darwin --codex --sandbox read-only
+ *   darwin --omx --high baseline
  *   DARWIN_ENGINE=omx darwin baseline
+ *
+ * If no engine is selected, Darwin defaults to `omx --madmax --xhigh`.
+ * If OMX cannot be launched, call sites fall back to plain `codex`.
  */
 export function extractEngineSelection(argv: string[]): EngineSelection {
   let explicitEngine: string | undefined;
@@ -93,6 +100,17 @@ export function extractEngineSelection(argv: string[]): EngineSelection {
   return { engine: parseEngineName(explicitEngine), args, engineArgs };
 }
 
+export function defaultEngineArgs(engine: EngineName): string[] {
+  return engine === "omx" ? [...DEFAULT_OMX_ARGS] : [];
+}
+
+export function resolveEngineArgs(
+  engine: EngineName,
+  explicitArgs: string[] = [],
+): string[] {
+  return explicitArgs.length > 0 ? explicitArgs : defaultEngineArgs(engine);
+}
+
 export function engineCommand(engine: EngineName): string {
   return engine;
 }
@@ -128,6 +146,28 @@ export function engineEnv(engine: EngineName): NodeJS.ProcessEnv {
     ...process.env,
     OMX_LAUNCH_POLICY: "direct",
   };
+}
+
+export function fallbackEngine(engine: EngineName): EngineName | null {
+  return engine === "omx" ? "codex" : null;
+}
+
+export function isEngineLaunchError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "EACCES";
+}
+
+export function fallbackNotice(
+  engine: EngineName,
+  fallback: EngineName,
+  err: unknown,
+): string {
+  const code = err && typeof err === "object"
+    ? (err as NodeJS.ErrnoException).code
+    : undefined;
+  const detail = code ? ` (${code})` : "";
+  return `darwin: ${engineCommand(engine)} could not launch${detail}; falling back to ${engineCommand(fallback)}\n`;
 }
 
 function splitArgs(raw: string): string[] {

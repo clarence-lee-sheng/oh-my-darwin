@@ -1,5 +1,9 @@
 import { spawnEngine } from "./bridge.js";
-import type { EngineName } from "./engine.js";
+import {
+  DEFAULT_ENGINE,
+  resolveEngineArgs,
+  type EngineName,
+} from "./engine.js";
 import { dispatch } from "../hooks/extensibility/dispatcher.js";
 
 /**
@@ -9,17 +13,18 @@ import { dispatch } from "../hooks/extensibility/dispatcher.js";
  */
 export async function runEngine(
   args: string[],
-  engine: EngineName,
-  engineArgs: string[] = [],
+  engine: EngineName = DEFAULT_ENGINE,
+  engineArgs: string[] = resolveEngineArgs(engine),
 ): Promise<number> {
   const started = Date.now();
   await dispatch("run_start", { engine, engine_args: engineArgs, args, started });
 
-  const { exit } = spawnEngine(engine, args, { engineArgs });
-  const code = await exit;
+  const { exitInfo } = spawnEngine(engine, args, { engineArgs });
+  const { engine: completedEngine, code } = await exitInfo;
 
   await dispatch("run_end", {
     engine,
+    actual_engine: completedEngine,
     engine_args: engineArgs,
     args,
     started,

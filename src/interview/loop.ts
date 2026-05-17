@@ -12,14 +12,19 @@ import { scanBrownfield } from "./brownfield.js";
 import { buildSystemPrompt } from "./prompt.js";
 import { callInterviewer, type Turn } from "./codex-call.js";
 import { meanAmbiguity, type Envelope } from "./schema.js";
-import { engineLabel, type EngineName } from "../runtime/engine.js";
+import {
+  DEFAULT_ENGINE,
+  engineLabel,
+  resolveEngineArgs,
+  type EngineName,
+} from "../runtime/engine.js";
 
 const MAX_TURNS = 15;
 const AMBIGUITY_THRESHOLD = 0.2;
 
 export async function runInterview(
-  engine: EngineName = "codex",
-  engineArgs: string[] = [],
+  engine: EngineName = DEFAULT_ENGINE,
+  engineArgs: string[] = resolveEngineArgs(engine),
 ): Promise<void> {
   const cwd = process.cwd();
   const darwinDir = join(cwd, DARWIN_DIR);

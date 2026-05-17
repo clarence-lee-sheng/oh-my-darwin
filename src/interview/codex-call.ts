@@ -9,9 +9,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ENVELOPE_SCHEMA, type Envelope } from "./schema.js";
 import {
+  DEFAULT_ENGINE,
   engineCommand,
   engineEnv,
   engineExecLabel,
+  fallbackEngine,
+  fallbackNotice,
+  isEngineLaunchError,
+  resolveEngineArgs,
   type EngineName,
 } from "../runtime/engine.js";
 
@@ -28,8 +33,26 @@ export interface Turn {
 export async function callInterviewer(
   systemPrompt: string,
   history: Turn[],
-  engine: EngineName = "codex",
-  engineArgs: string[] = [],
+  engine: EngineName = DEFAULT_ENGINE,
+  engineArgs: string[] = resolveEngineArgs(engine),
+): Promise<Envelope> {
+  try {
+    return await callInterviewerOnce(systemPrompt, history, engine, engineArgs);
+  } catch (err) {
+    const fallback = fallbackEngine(engine);
+    if (fallback && isEngineLaunchError(err)) {
+      process.stderr.write(fallbackNotice(engine, fallback, err));
+      return callInterviewerOnce(systemPrompt, history, fallback, []);
+    }
+    throw err;
+  }
+}
+
+async function callInterviewerOnce(
+  systemPrompt: string,
+  history: Turn[],
+  engine: EngineName,
+  engineArgs: string[],
 ): Promise<Envelope> {
   const dir = mkdtempSync(join(tmpdir(), "hyp-init-"));
   const schemaPath = join(dir, "schema.json");

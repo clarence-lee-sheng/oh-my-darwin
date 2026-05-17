@@ -6,7 +6,7 @@
 
 The Stanford meta-harness pattern (propose harness variant → validate → evaluate → keep frontier → repeat) is powerful but inaccessible — using it today requires writing `meta_harness.py` from scratch, designing a benchmark, and wiring an evaluator. oh-my-darwin's product is the **on-ramp**: a guided interview turns "I have a task" into a runnable meta-loop spec, then a small set of commands drives the loop and surfaces progress.
 
-oh-my-darwin is built as a wrapper around the **Codex CLI** with optional **OMX (`oh-my-codex`)** launch support, structurally inspired by `oh-my-codex` (hook bridge, dispatcher, plugin SDK). Codex/OMX is the execution engine; oh-my-darwin is the on-ramp and the loop driver on top.
+oh-my-darwin is built as a wrapper around **OMX (`oh-my-codex`)** and the **Codex CLI**, structurally inspired by `oh-my-codex` (hook bridge, dispatcher, plugin SDK). The default execution engine is `omx --madmax --xhigh`, with automatic fallback to plain `codex` when OMX cannot launch; oh-my-darwin is the on-ramp and the loop driver on top.
 
 ## Who uses this and why
 
@@ -83,7 +83,7 @@ Five new commands, in priority order. Each ships independently useful behavior.
 
 ### 1. `darwin init` — the interviewer  *(first deliverable, ~70% of product value)*
 
-Conducts an **adaptive Socratic interview** (Ouroboros-inspired) that produces `.darwin/meta-spec.md`. Uses the selected engine — Codex by default, OMX when requested — to dogfood the bridge.
+Conducts an **adaptive Socratic interview** (Ouroboros-inspired) that produces `.darwin/meta-spec.md`. Uses the selected engine — `omx --madmax --xhigh` by default, `codex` on fallback or explicit request — to dogfood the bridge.
 
 **Behavior:**
 

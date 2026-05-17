@@ -11,9 +11,11 @@ import { stdin, stdout, stderr } from "node:process";
 import { fileURLToPath } from "node:url";
 import { spawnEngine } from "../runtime/bridge.js";
 import {
+  DEFAULT_ENGINE,
   engineCommand,
   engineLabel,
   formatEngineCommand,
+  resolveEngineArgs,
   type EngineName,
 } from "../runtime/engine.js";
 import { readSpec } from "../spec/parse.js";
@@ -126,8 +128,8 @@ Exit when the file is written.`;
 
 export async function meta(
   args: string[],
-  engine: EngineName = "codex",
-  engineArgs: string[] = [],
+  engine: EngineName = DEFAULT_ENGINE,
+  engineArgs: string[] = resolveEngineArgs(engine),
 ): Promise<void> {
   const iterations = parseIterations(args);
   const cwd = process.cwd();
@@ -265,11 +267,11 @@ async function runIteration(
     `darwin: launching ${formatEngineCommand(engine, engineArgs)} (${engineLabel(engine)}, interactive) with candidate harness\n`,
   );
   const startedAt = Date.now();
-  const { exit } = spawnEngine(engine, [prompt], { engineArgs });
-  const exitCode = await exit;
+  const { exitInfo } = spawnEngine(engine, [prompt], { engineArgs });
+  const { engine: completedEngine, code: exitCode } = await exitInfo;
   const endedAt = Date.now();
   stderr.write(
-    `darwin: ${engineCommand(engine)} exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
+    `darwin: ${engineCommand(completedEngine)} exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
   );
 
   // 4. Score

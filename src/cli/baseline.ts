@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { stdin, stdout, stderr } from "node:process";
 import { spawnEngine } from "../runtime/bridge.js";
 import {
+  DEFAULT_ENGINE,
   engineCommand,
   engineLabel,
   formatEngineCommand,
+  resolveEngineArgs,
   type EngineName,
 } from "../runtime/engine.js";
 import { readSpec } from "../spec/parse.js";
@@ -26,8 +28,8 @@ import {
  * row + a runs/baseline/ directory with the task prompt for the record.
  */
 export async function baseline(
-  engine: EngineName = "codex",
-  engineArgs: string[] = [],
+  engine: EngineName = DEFAULT_ENGINE,
+  engineArgs: string[] = resolveEngineArgs(engine),
 ): Promise<void> {
   const cwd = process.cwd();
   const spec = readSpec(cwd);
@@ -49,12 +51,12 @@ export async function baseline(
   );
 
   const startedAt = Date.now();
-  const { exit } = spawnEngine(engine, [spec.task], { engineArgs });
-  const exitCode = await exit;
+  const { exitInfo } = spawnEngine(engine, [spec.task], { engineArgs });
+  const { engine: completedEngine, code: exitCode } = await exitInfo;
   const endedAt = Date.now();
 
   stderr.write(
-    `\ndarwin: ${engineCommand(engine)} exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
+    `\ndarwin: ${engineCommand(completedEngine)} exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
   );
 
   // Capture realized score + optional note.

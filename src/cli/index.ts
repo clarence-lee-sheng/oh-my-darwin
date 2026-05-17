@@ -9,6 +9,7 @@ import {
   engineLabel,
   extractEngineSelection,
   formatEngineCommand,
+  resolveEngineArgs,
 } from "../runtime/engine.js";
 
 const SUBCOMMANDS = new Set([
@@ -30,7 +31,10 @@ async function main(): Promise<void> {
     process.argv.slice(2),
   );
   const command = splitCommand(selectedArgs);
-  const engineArgs = [...selectedEngineArgs, ...command.leadingEngineArgs];
+  const engineArgs = resolveEngineArgs(engine, [
+    ...selectedEngineArgs,
+    ...command.leadingEngineArgs,
+  ]);
   const first = command.first;
   const rest = command.rest;
 
@@ -89,7 +93,10 @@ function splitCommand(args: string[]): {
 
 function printUsage(
   engine = extractEngineSelection([]).engine,
-  engineArgs = extractEngineSelection([]).engineArgs,
+  engineArgs = resolveEngineArgs(
+    extractEngineSelection([]).engine,
+    extractEngineSelection([]).engineArgs,
+  ),
 ): void {
   console.log(`darwin — meta-harness on-ramp (wraps Codex or OMX)
 
@@ -104,13 +111,18 @@ usage:
 engine selection:
   --engine codex|omx             choose the agent CLI for this invocation
   --codex / --omx                shortcuts for --engine codex / --engine omx
-  DARWIN_ENGINE=codex|omx        default engine when no flag is passed
+  DARWIN_ENGINE=codex|omx        default engine when no flag is passed (omx by default)
   --engine-arg <arg>             prepend one arg to internal engine launches
   --engine-args "<args>"          prepend shell-like args to internal launches
-  DARWIN_ENGINE_ARGS="..."       default args for internal engine launches
+  DARWIN_ENGINE_ARGS="..."       override default internal engine args
+
+defaults:
+  omx --madmax --xhigh           used when no engine/args are selected
+  codex                          fallback when omx cannot launch
 
 examples:
-  darwin --omx --madmax --xhigh baseline
+  darwin baseline
+  darwin --codex baseline
   DARWIN_ENGINE=omx DARWIN_ENGINE_ARGS="--madmax --xhigh" darwin meta
 
 selected/default engine: ${engineLabel(engine)}
