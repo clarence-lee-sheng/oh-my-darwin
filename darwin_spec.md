@@ -135,6 +135,20 @@ Supports `--project <path>` to inspect any project without `cd`.
 
 Lists known projects from `~/.darwin/projects.json` (lazily updated on `init`/`run`). Shows path, task one-liner, last activity. Regeneratable by `darwin list --rescan ~/`.
 
+### 6. Project capabilities — local skills and safe hooks
+
+`darwin meta` may now stage a `capability-manifest.json` next to a proposed
+harness. The first supported capability types are deliberately narrow:
+
+- **Project-scoped Codex skills**: promoted to `.agents/skills/<name>/SKILL.md`.
+- **Project-scoped Codex hooks**: promoted into `.codex/hooks.json` only when
+  the command is the stable `darwin-hook <event>` dispatcher.
+
+Darwin stores ownership both locally (`.darwin/ownership/*.json`) and globally
+(`~/.darwin/projects/<project-id>/capabilities.json`). Generated skills/hooks
+are auto-promoted after validation, but are only advertised to the proposer on
+the next iteration.
+
 ## Architecture (already built, unchanged)
 
 The wrapping mechanism is identical to what we already have. Five new commands plug into the same substrate.
@@ -251,7 +265,8 @@ To stay scoped:
 - No tmux panes, no HUD, no visual dashboards
 - No MCP server, no persistent shared memory across sessions
 - No multi-agent teams (parallel Codex sessions coordinating)
-- No skill DSL, prompt library, or workflow templates
+- No global skill DSL, prompt marketplace, or agent system. The only accepted
+  skill artifact is a project-scoped Codex-compatible `SKILL.md`.
 - No multi-harness adapters (Claude Code etc.) — Codex only
 - No plugin marketplace, no community plugin catalog
 - No cross-project intelligence (each project is isolated)

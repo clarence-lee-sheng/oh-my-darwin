@@ -19,9 +19,19 @@ import {
 } from "../state/history.js";
 import { loadAndValidate, type Harness } from "../harness/load.js";
 import { invokeProposer } from "../proposer/invoke.js";
+import { resolveCurrentProject } from "../projects/registry.js";
+import {
+  discoverCapabilities,
+  formatCapabilitiesForPrompt,
+  promoteCapabilities,
+  validateCapabilityProposal,
+  type ValidatedCapabilityBundle,
+} from "../capabilities/manifest.js";
 import { init } from "./init.js";
 import { baseline } from "./baseline.js";
 import {
+  CAPABILITY_MANIFEST_FILE,
+  CAPABILITIES_DIR,
   DARWIN_DIR,
   HARNESS_DIR,
   HARNESS_FILE,
@@ -121,8 +131,11 @@ interface ProposerPromptArgs {
   frontierAttempt: string;
   frontierScore: number | null;
   priorHint?: string;
+  specCapabilities?: string;
+  capabilitiesContext: string;
   proposalDirRel: string;
   proposalPathRel: string;
+  proposalManifestRel: string;
 }
 
 function buildProposerPrompt(a: ProposerPromptArgs): string {
@@ -149,11 +162,21 @@ CURRENT HARNESS (.darwin/harness/harness.mjs):
 ${a.currentHarness}
 \`\`\`
 ${hintBlock}
+SPEC CAPABILITY POLICY:
+${a.specCapabilities?.trim() || "- skills: allowed (project-scoped Codex-compatible SKILL.md)\n- hooks: allowed (project-scoped darwin-hook entries)\n- agents: disallowed\n- promotion: auto-promote validated skills/hooks for next iteration"}
+
+PROJECT CAPABILITIES AVAILABLE THIS ITERATION:
+${a.capabilitiesContext}
+
+Capability availability rule:
+- Only capabilities already listed above may be assumed by this iteration.
+- Any new skill/hook you propose now is staged and may become available next iteration only.
+
 YOUR ACTIONS:
 - Read .darwin/evolution.jsonl and any .darwin/runs/*/ trajectories to
   understand what's been tried and what failed.
 - Read .darwin/proposals/iter-*/harness.mjs to see prior candidates.
-- Then Write exactly ONE file at: ${a.proposalPathRel}
+- Then write the required harness file at: ${a.proposalPathRel}
   The file must default-export an object with a buildPrompt(task) method
   that returns a non-empty string. It is plain ESM JavaScript — no
   TypeScript syntax, no transpile step. Use JSDoc for any type hints.
@@ -163,6 +186,26 @@ YOUR ACTIONS:
 - Do not call shell, network, or filesystem-write APIs inside your harness.
 - Do not modify any other file (no edits to .darwin/harness/, no edits to
   prior runs/proposals).
+
+OPTIONAL PROJECT-SCOPED CAPABILITIES:
+- You may also write ${a.proposalManifestRel} plus files under
+  .darwin/${a.proposalDirRel}/${CAPABILITIES_DIR}/ if a reusable project
+  skill or Codex hook would help future iterations.
+- Do not create agents in this phase.
+- Skills must be Codex-compatible SKILL.md files staged under:
+  .darwin/${a.proposalDirRel}/${CAPABILITIES_DIR}/skills/<skill-name>/SKILL.md
+  with YAML frontmatter containing name and description.
+- Hooks must be project-scoped Codex hook entries whose command is exactly
+  "darwin-hook <event>". Hooks may be observe or block_or_allow, but arbitrary
+  shell commands are never safe.
+- If you create capabilities, write JSON:
+  {
+    "version": 1,
+    "capabilities": [
+      {"kind":"skill","name":"example","path":"${CAPABILITIES_DIR}/skills/example/SKILL.md"},
+      {"kind":"hook","name":"example-hook","event":"pre_tool_use","command":"darwin-hook pre_tool_use","mode":"observe"}
+    ]
+  }
 
 Write a one-sentence hypothesis at the top of the file as a // comment.
 
@@ -293,11 +336,16 @@ async function runIteration(
   const proposalDirRel = `${PROPOSALS_DIR}/${attemptId}`;
   const proposalHarness = join(proposalDir, HARNESS_FILE);
   const proposalHarnessRel = `${DARWIN_DIR}/${proposalDirRel}/${HARNESS_FILE}`;
+  const proposalManifestRel = `${DARWIN_DIR}/${proposalDirRel}/${CAPABILITY_MANIFEST_FILE}`;
   mkdirSync(proposalDir, { recursive: true });
 
   const front = readFrontier(cwd)!;
   const currentHarness = readFileSync(harnessPath(cwd), "utf-8");
   const priorHint = readLastEvolutionHint(cwd);
+  const project = resolveCurrentProject(cwd);
+  const capabilitiesContext = formatCapabilitiesForPrompt(
+    discoverCapabilities(cwd, project),
+  );
 
   const proposerPrompt = buildProposerPrompt({
     task,
@@ -305,8 +353,11 @@ async function runIteration(
     frontierAttempt: front.attempt_id,
     frontierScore: front.score,
     priorHint,
+    specCapabilities: spec.capabilities,
+    capabilitiesContext,
     proposalDirRel,
     proposalPathRel: proposalHarnessRel,
+    proposalManifestRel,
   });
 
   // 1. Propose
@@ -329,6 +380,25 @@ async function runIteration(
   }
 
   // 2. Validate
+  let capabilityBundle: ValidatedCapabilityBundle | null = null;
+  try {
+    capabilityBundle = validateCapabilityProposal(cwd, proposalDir, project);
+  } catch (e) {
+    stderr.write(`darwin: candidate ${attemptId} rejected (capabilities: ${e})\n`);
+    appendEvolution(
+      {
+        t: new Date().toISOString(),
+        attempt_id: attemptId,
+        score: null,
+        outcome: "rejected",
+        note: `capability validation: ${String(e).slice(0, 200)}`,
+        run_dir: proposalDirRel,
+      },
+      cwd,
+    );
+    return "rejected";
+  }
+
   let harness: Harness;
   try {
     harness = await loadAndValidate(proposalHarness);
@@ -384,11 +454,36 @@ async function runIteration(
     }
   }
 
-  // 6. Record
+  // 6. Promote validated capabilities for the NEXT iteration.
+  let capabilityNote: string | undefined;
+  try {
+    const promotion = promoteCapabilities(cwd, capabilityBundle, project);
+    if (promotion.promoted.length > 0) {
+      capabilityNote = `capabilities promoted for next iteration: ${promotion.promoted.join(", ")}`;
+      stderr.write(`darwin: ${capabilityNote}\n`);
+    }
+  } catch (e) {
+    stderr.write(`darwin: capability promotion failed: ${e}\n`);
+    appendEvolution(
+      {
+        t: new Date().toISOString(),
+        attempt_id: attemptId,
+        score: null,
+        outcome: "failed",
+        note: `capability promotion: ${String(e).slice(0, 200)}`,
+        run_dir: runDirRel,
+      },
+      cwd,
+    );
+    return "failed";
+  }
+
+  // 7. Record
   const t = new Date().toISOString();
   const outcome = score === null ? "skipped" : "scored";
   const front2 = readFrontier(cwd)!;
   const delta = score !== null && front2.score !== null ? score - front2.score : undefined;
+  const finalNote = [note, capabilityNote].filter(Boolean).join("\n");
 
   appendEvolution(
     {
@@ -396,7 +491,7 @@ async function runIteration(
       attempt_id: attemptId,
       score,
       outcome,
-      note,
+      note: finalNote,
       run_dir: runDirRel,
       delta,
       next_hint: nextHint,
@@ -404,11 +499,11 @@ async function runIteration(
     cwd,
   );
 
-  // 7. Promote if improved
+  // 8. Promote harness if improved
   if (score !== null && (front2.score === null || score > front2.score)) {
     copyFileSync(proposalHarness, harnessPath(cwd));
     writeFrontier(
-      { attempt_id: attemptId, score, t, note, run_dir: runDirRel },
+      { attempt_id: attemptId, score, t, note: finalNote, run_dir: runDirRel },
       cwd,
     );
     stderr.write(
