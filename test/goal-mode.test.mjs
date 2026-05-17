@@ -6,6 +6,7 @@ import {
   resolveGoalAttemptMode,
 } from "../dist/runtime/goal-attempt.js";
 import { engineExecArgs, engineInteractiveArgs } from "../dist/runtime/engine.js";
+import { shouldPromptForGoalApproval } from "../dist/cli/meta.js";
 
 test("goal attempt defaults to non-interactive exec mode", () => {
   const prev = process.env.DARWIN_GOAL_ATTEMPT_MODE;
@@ -49,5 +50,24 @@ test("OMX interactive args retain direct launch but strip conflicting launch pol
   assert.deepEqual(
     engineInteractiveArgs("omx", ["--madmax", "--xhigh", "--tmux"], ["--no-alt-screen"]),
     ["--direct", "--madmax", "--xhigh", "--no-alt-screen"],
+  );
+});
+
+test("goal approval prompt stays on for unbounded/manual runs only", () => {
+  assert.equal(
+    shouldPromptForGoalApproval({ interactive: false, maxIterations: Infinity, maxDurationMs: Infinity }),
+    true,
+  );
+  assert.equal(
+    shouldPromptForGoalApproval({ interactive: true, maxIterations: 1, maxDurationMs: Infinity }),
+    true,
+  );
+  assert.equal(
+    shouldPromptForGoalApproval({ interactive: false, maxIterations: 1, maxDurationMs: Infinity }),
+    false,
+  );
+  assert.equal(
+    shouldPromptForGoalApproval({ interactive: false, maxIterations: Infinity, maxDurationMs: 60_000 }),
+    false,
   );
 });

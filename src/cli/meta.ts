@@ -828,9 +828,10 @@ async function runGoalIteration(
     return "rejected";
   }
 
-  // 2b. Optional HITL approval (BEFORE execution). In bounded/non-interactive
-  // runs, auto-approve so goal-mode can be scripted by demos and CI.
-  const approved = opts.interactive
+  // 2b. Optional HITL approval (BEFORE execution). Preserve the unbounded
+  // operator confirmation path; only bounded non-interactive runs auto-approve
+  // so demos and CI do not hang.
+  const approved = shouldPromptForGoalApproval(opts)
     ? await promptYesNo(
         "\nrun this goal? [Y/n/skip] ",
         true,
@@ -925,6 +926,13 @@ async function runGoalIteration(
   void delta;
 
   return outcome as IterationOutcome;
+}
+
+export function shouldPromptForGoalApproval(
+  opts: Pick<LoopOptions, "interactive" | "maxIterations" | "maxDurationMs">,
+): boolean {
+  const unbounded = !Number.isFinite(opts.maxIterations) && !Number.isFinite(opts.maxDurationMs);
+  return opts.interactive || unbounded;
 }
 
 function sumCounts(counts: Record<string, number>): number {
