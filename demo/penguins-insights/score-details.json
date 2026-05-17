@@ -1,0 +1,47 @@
+{
+  "score": 0,
+  "max_score": 10,
+  "checks": {
+    "row_count": false,
+    "species_counts": false,
+    "island_counts": false,
+    "most_common_island": false,
+    "year_range": false,
+    "missing_measurement_rows": false,
+    "species_with_highest_mean_body_mass": false,
+    "species_with_longest_mean_flipper": false,
+    "mean_body_mass_g_by_species": false,
+    "executive_summary": false
+  },
+  "expected": {
+    "row_count": 344,
+    "species_counts": {
+      "Adelie": 152,
+      "Gentoo": 124,
+      "Chinstrap": 68
+    },
+    "island_counts": {
+      "Torgersen": 52,
+      "Biscoe": 168,
+      "Dream": 124
+    },
+    "most_common_island": "Biscoe",
+    "year_range": [
+      2007,
+      2009
+    ],
+    "missing_measurement_rows": 0,
+    "mean_body_mass_g_by_species": {
+      "Adelie": 3700.662251655629,
+      "Gentoo": 5076.016260162602,
+      "Chinstrap": 3733.0882352941176
+    },
+    "mean_flipper_length_mm_by_species": {
+      "Adelie": 189.95364238410596,
+      "Gentoo": 217.1869918699187,
+      "Chinstrap": 195.8235294117647
+    },
+    "species_with_highest_mean_body_mass": "Gentoo",
+    "species_with_longest_mean_flipper": "Gentoo"
+  }
+}

@@ -11,3 +11,7 @@ dist/
 .env
 
 make_money_v4
+
+# Keep the deterministic hackathon demo seed state versionable.
+!demo/*/.darwin/
+!demo/*/.darwin/**

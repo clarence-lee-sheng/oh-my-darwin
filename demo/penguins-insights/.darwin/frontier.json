@@ -1,0 +1,7 @@
+{
+  "attempt_id": "baseline",
+  "score": 0,
+  "t": "2026-05-17T00:00:00.000Z",
+  "note": "Seeded empty-report baseline for non-code analytics demo; no insights.json exists yet.",
+  "run_dir": "runs/baseline"
+}

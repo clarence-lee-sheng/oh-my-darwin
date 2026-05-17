@@ -3,6 +3,15 @@ import { existsSync, statSync, openSync, readSync, closeSync, writeFileSync } fr
 import { join, resolve } from "node:path";
 import { stderr } from "node:process";
 import { DARWIN_DIR, EVENTS_LOG } from "../cli/constants.js";
+import {
+  DEFAULT_ENGINE,
+  engineCommand,
+  engineEnv,
+  engineInteractiveArgs,
+  formatEngineCommand,
+  resolveEngineArgs,
+  type EngineName,
+} from "./engine.js";
 
 export type GoalExitReason =
   | "quiet"          // no new tool/prompt activity within quietMs after last `stop`
@@ -24,8 +33,12 @@ export interface GoalAttemptResult {
 export interface GoalAttemptOptions {
   /** The natural-language goal to /goal into Codex. */
   goal: string;
-  /** cwd for the codex child (and where .darwin/events.jsonl lives). */
+  /** cwd for the engine child (and where .darwin/events.jsonl lives). */
   cwd: string;
+  /** Agent engine used for the interactive slash-goal attempt. */
+  engine?: EngineName;
+  /** Engine/launch args selected by Darwin's CLI config. */
+  engineArgs?: string[];
   /** Per-attempt knobs forwarded to codex CLI flags. */
   knobs?: {
     model?: string;
@@ -56,8 +69,8 @@ const DEFAULTS = {
 };
 
 /**
- * Run one Codex /goal attempt. Spawns codex interactively (TUI visible to
- * the user), injects `/goal <text>` once the TUI is ready, then watches
+ * Run one slash-goal attempt. Spawns the selected engine interactively (TUI
+ * visible to the user), injects `/goal <text>` once the TUI is ready, then watches
  * .darwin/events.jsonl to decide when the goal has stopped making progress.
  *
  * Completion heuristic: after we see a `stop` event, start a quiet timer.
@@ -69,22 +82,53 @@ export async function runGoalAttempt(
 ): Promise<GoalAttemptResult> {
   const cfg = { ...DEFAULTS, ...opts };
   const startedAt = Date.now();
+  const engine = opts.engine ?? DEFAULT_ENGINE;
+  const selectedEngineArgs = opts.engineArgs ?? resolveEngineArgs(engine);
 
-  // Build codex argv. No PROMPT arg — we inject /goal via stdin after warmup.
-  const codexArgs: string[] = [];
-  if (opts.knobs?.model) codexArgs.push("-m", opts.knobs.model);
-  if (opts.knobs?.sandbox) codexArgs.push("-s", opts.knobs.sandbox);
-  if (opts.knobs?.approval) codexArgs.push("-a", opts.knobs.approval);
+  // Build engine argv. No PROMPT arg — we inject /goal via stdin after warmup.
+  const goalArgs: string[] = [];
+  if (opts.knobs?.model) goalArgs.push("-m", opts.knobs.model);
+  const bypassesApprovalsAndSandbox = hasBypassApprovalsAndSandbox(selectedEngineArgs);
+  if (bypassesApprovalsAndSandbox) {
+    if (opts.knobs?.sandbox || opts.knobs?.approval) {
+      stderr.write(
+        "darwin: engine args already bypass approvals/sandbox; ignoring proposed sandbox/approval knobs for this goal attempt\n",
+      );
+    }
+  } else {
+    if (opts.knobs?.sandbox) {
+      if (hasSandboxArg(selectedEngineArgs)) {
+        stderr.write("darwin: engine args already set sandbox; ignoring proposed sandbox knob\n");
+      } else {
+        goalArgs.push("-s", opts.knobs.sandbox);
+      }
+    }
+    if (opts.knobs?.approval) {
+      if (hasApprovalArg(selectedEngineArgs)) {
+        stderr.write("darwin: engine args already set approval policy; ignoring proposed approval knob\n");
+      } else {
+        goalArgs.push("-a", opts.knobs.approval);
+      }
+    }
+  }
+  // Preserve scrollback and make scripted `/goal` injection easier to debug.
+  goalArgs.push("--no-alt-screen");
+  const launchArgs = engineInteractiveArgs(engine, selectedEngineArgs, goalArgs);
 
   const eventsPath = resolve(opts.cwd, DARWIN_DIR, EVENTS_LOG);
   const tail = startTail(eventsPath);
 
   stderr.write(
-    `darwin: spawning codex for /goal attempt (model=${opts.knobs?.model ?? "default"}, sandbox=${opts.knobs?.sandbox ?? "default"})\n`,
+    `darwin: spawning ${formatEngineCommand(engine, launchArgs)} for /goal attempt (model=${opts.knobs?.model ?? "default"}, sandbox=${opts.knobs?.sandbox ?? "default"})\n`,
   );
 
-  const child = spawn("codex", codexArgs, {
+  const launch = ptyLaunchCommand(engineCommand(engine), launchArgs);
+  if (launch.ptyWrapped) {
+    stderr.write(`darwin: wrapping ${engineCommand(engine)} in a pseudo-terminal for /goal automation (${launch.command})\n`);
+  }
+  const child = spawn(launch.command, launch.args, {
     cwd: opts.cwd,
+    env: engineEnv(engine),
     stdio: ["pipe", "inherit", "inherit"],
   });
 
@@ -204,6 +248,8 @@ export async function runGoalAttempt(
         opts.trajectoryPath,
         JSON.stringify(
           {
+            engine,
+            engine_args: selectedEngineArgs,
             goal: opts.goal,
             knobs: opts.knobs ?? {},
             started_at: new Date(startedAt).toISOString(),
@@ -225,6 +271,143 @@ export async function runGoalAttempt(
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
 }
+
+function ptyLaunchCommand(command: string, args: string[]): {
+  command: string;
+  args: string[];
+  ptyWrapped: boolean;
+} {
+  // Interactive Codex requires stdin to be a terminal. Darwin needs to inject
+  // `/goal` programmatically, so a normal pipe triggers:
+  //   Error: stdin is not a terminal
+  // A Python pty bridge gives Codex a real pty while still letting Darwin write
+  // scripted input to the bridge's stdin. Avoid macOS/BSD `script`: in Codex /
+  // tmux-style launch environments the parent's stdio can be a socket, causing
+  // `script: tcgetattr/ioctl: Operation not supported on socket`.
+  if (process.platform !== "win32") {
+    return {
+      command: "python3",
+      args: ["-c", PYTHON_PTY_BRIDGE, command, ...args],
+      ptyWrapped: true,
+    };
+  }
+  return { command, args, ptyWrapped: false };
+}
+
+function hasBypassApprovalsAndSandbox(args: string[]): boolean {
+  return args.some((arg) =>
+    arg === "--dangerously-bypass-approvals-and-sandbox" ||
+    arg === "--madmax" ||
+    arg === "--madmax-spark" ||
+    arg === "--yolo"
+  );
+}
+
+function hasSandboxArg(args: string[]): boolean {
+  return hasOption(args, "-s", "--sandbox");
+}
+
+function hasApprovalArg(args: string[]): boolean {
+  return hasOption(args, "-a", "--ask-for-approval");
+}
+
+function hasOption(args: string[], shortName: string, longName: string): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === shortName || arg === longName || arg.startsWith(`${longName}=`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const PYTHON_PTY_BRIDGE = String.raw`
+import errno
+import os
+import pty
+import select
+import signal
+import sys
+
+argv = sys.argv[1:]
+if not argv:
+    sys.exit(2)
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(argv[0], argv)
+
+def forward_signal(signum, _frame):
+    try:
+        os.kill(pid, signum)
+    except ProcessLookupError:
+        pass
+
+for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    try:
+        signal.signal(_sig, forward_signal)
+    except Exception:
+        pass
+
+stdin_open = True
+status = None
+
+while True:
+    if status is None:
+        try:
+            done, maybe_status = os.waitpid(pid, os.WNOHANG)
+            if done == pid:
+                status = maybe_status
+        except ChildProcessError:
+            status = 0
+
+    read_fds = [fd]
+    if stdin_open:
+        read_fds.append(0)
+
+    try:
+        readable, _, _ = select.select(read_fds, [], [], 0.1)
+    except OSError:
+        break
+
+    if stdin_open and 0 in readable:
+        data = os.read(0, 4096)
+        if data:
+            try:
+                os.write(fd, data)
+            except OSError:
+                stdin_open = False
+        else:
+            stdin_open = False
+
+    if fd in readable:
+        try:
+            data = os.read(fd, 4096)
+        except OSError as e:
+            if e.errno in (errno.EIO, errno.EBADF):
+                break
+            raise
+        if not data:
+            break
+        os.write(1, data)
+
+    # Once the child has exited and no pty bytes were immediately available,
+    # the next read normally raises EIO. Keep looping briefly to drain output.
+    if status is not None and not readable:
+        break
+
+if status is None:
+    try:
+        _, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        status = 0
+
+if os.WIFEXITED(status):
+    sys.exit(os.WEXITSTATUS(status))
+if os.WIFSIGNALED(status):
+    sys.exit(128 + os.WTERMSIG(status))
+sys.exit(1)
+`;
 
 interface EventRecord {
   t?: string;

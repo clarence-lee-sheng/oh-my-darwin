@@ -1,0 +1,7 @@
+{
+  "attempt_id": "baseline",
+  "score": 0,
+  "t": "2026-05-17T00:00:00.000Z",
+  "note": "Seeded failing baseline for the hackathon demo; run `npm test` before repair to reproduce.",
+  "run_dir": "runs/baseline"
+}

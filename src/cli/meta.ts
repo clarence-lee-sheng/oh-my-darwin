@@ -62,6 +62,7 @@ import {
 import { readNiches, writeNiches } from "../state/niches.js";
 import { init } from "./init.js";
 import { baseline } from "./baseline.js";
+import { ensureHooks } from "./setup.js";
 import {
   CAPABILITY_MANIFEST_FILE,
   CAPABILITIES_DIR,
@@ -340,6 +341,8 @@ export async function meta(
 
   if (!opts.goalMode) {
     ensureBaselineHarness(cwd);
+  } else if (ensureHooks()) {
+    stderr.write("darwin: installed .codex/hooks.json for goal-mode event tracking\n");
   }
 
   stderr.write(
@@ -377,7 +380,7 @@ export async function meta(
     stderr.write(`\n=== iteration ${label} ===\n`);
 
     const outcome = opts.goalMode
-      ? await runGoalIteration(i, cwd, spec, opts)
+      ? await runGoalIteration(i, cwd, spec, opts, engine, engineArgs)
       : await runIteration(i, cwd, spec, engine, engineArgs);
 
     // Stop: too many consecutive validation failures
@@ -714,6 +717,8 @@ async function runGoalIteration(
   cwd: string,
   spec: SpecSlice,
   opts: LoopOptions,
+  engine: EngineName,
+  engineArgs: string[],
 ): Promise<IterationOutcome> {
   const task = spec.task;
   const attemptId = `iter-${i}`;
@@ -759,7 +764,10 @@ async function runGoalIteration(
   // 1. Propose
   let candidate: GoalCandidate;
   try {
-    candidate = await invokeGoalProposer(proposerPrompt, cwd);
+    candidate = await invokeGoalProposer(proposerPrompt, cwd, {
+      engine,
+      engineArgs,
+    });
   } catch (e) {
     stderr.write(`darwin: goal proposer failed: ${e}\n`);
     appendEvolution(
@@ -833,10 +841,12 @@ async function runGoalIteration(
   }
 
   // 3. Execute via /goal
-  stderr.write("darwin: launching codex with /goal\n");
+  stderr.write(`darwin: launching ${engineLabel(engine)} with /goal\n`);
   const result = await runGoalAttempt({
     goal: candidate.goal,
     cwd,
+    engine,
+    engineArgs,
     knobs: candidate.knobs,
     maxDurationMs: opts.attemptMaxMs,
     quietMs: opts.attemptQuietMs,

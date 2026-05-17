@@ -3,6 +3,15 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stderr } from "node:process";
+import {
+  DEFAULT_ENGINE,
+  engineCommand,
+  engineEnv,
+  engineExecArgs,
+  formatEngineCommand,
+  resolveEngineArgs,
+  type EngineName,
+} from "../runtime/engine.js";
 
 export interface GoalCandidate {
   goal: string;
@@ -27,6 +36,13 @@ export interface ProposerInputs {
   }>;
   priorHint?: string;
 }
+
+export interface GoalProposerOptions {
+  engine?: EngineName;
+  engineArgs?: string[];
+}
+
+const DEFAULT_PROPOSER_TIMEOUT_MS = 2 * 60 * 1000;
 
 export function buildGoalProposerPrompt(a: ProposerInputs): string {
   const history = a.priorAttempts.length
@@ -85,41 +101,67 @@ Exit when you have emitted the JSON.`;
 }
 
 /**
- * Spawn `codex exec` with the proposer prompt and capture its final
+ * Spawn the selected engine's `exec` mode with the proposer prompt and capture
+ * its final
  * assistant message. Returns the parsed GoalCandidate.
  *
  * Uses --output-last-message so we get clean JSON without parsing JSONL
  * event stream. --skip-git-repo-check so it runs in any cwd.
+ *
+ * Important: this nested proposer is plumbing, not the actual attempt. Disable
+ * Codex hooks here so global hook stacks (for example OMX SessionStart hooks)
+ * cannot block the meta loop before Darwin has even proposed a goal.
  */
 export async function invokeGoalProposer(
   prompt: string,
   cwd: string,
+  options: GoalProposerOptions = {},
 ): Promise<GoalCandidate> {
   const tmp = mkdtempSync(join(tmpdir(), "darwin-proposer-"));
   const lastMsgPath = join(tmp, "last.txt");
+  const timeoutMs = parsePositiveInt(process.env.DARWIN_GOAL_PROPOSER_TIMEOUT_MS)
+    ?? DEFAULT_PROPOSER_TIMEOUT_MS;
+  const engine = options.engine ?? DEFAULT_ENGINE;
+  const selectedEngineArgs = options.engineArgs ?? resolveEngineArgs(engine);
 
   try {
-    const args = [
-      "exec",
+    const args = engineExecArgs(engine, selectedEngineArgs, [
       "--skip-git-repo-check",
+      "--disable",
+      "hooks",
       "--output-last-message",
       lastMsgPath,
       "--color",
       "never",
-      prompt,
-    ];
+      "-",
+    ]);
 
-    stderr.write("darwin: invoking codex exec for goal proposer...\n");
+    stderr.write(`darwin: invoking ${formatEngineCommand(engine, args)} for goal proposer...\n`);
     const code = await new Promise<number>((res, rej) => {
-      const child = spawn("codex", args, {
+      let timedOut = false;
+      const child = spawn(engineCommand(engine), args, {
         cwd,
-        stdio: ["ignore", "inherit", "inherit"],
+        env: engineEnv(engine),
+        stdio: ["pipe", "inherit", "inherit"],
       });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        stderr.write(`darwin: goal proposer timed out after ${Math.round(timeoutMs / 1000)}s — terminating codex exec\n`);
+        try { child.kill("SIGTERM"); } catch { /* ignore */ }
+        setTimeout(() => {
+          try { child.kill("SIGKILL"); } catch { /* ignore */ }
+        }, 2_000).unref();
+      }, timeoutMs);
+      child.stdin?.end(prompt + "\n");
       child.on("error", rej);
-      child.on("exit", (c) => res(c ?? 1));
+      child.on("exit", (c) => {
+        clearTimeout(timer);
+        if (timedOut) res(124);
+        else res(c ?? 1);
+      });
     });
     if (code !== 0) {
-      throw new Error(`codex exec exited ${code}`);
+      throw new Error(`${engineCommand(engine)} exec exited ${code}`);
     }
 
     const raw = readFileSync(lastMsgPath, "utf-8");
@@ -183,4 +225,10 @@ function stripFence(s: string): string {
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
+}
+
+function parsePositiveInt(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }

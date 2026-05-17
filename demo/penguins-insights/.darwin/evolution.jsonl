@@ -1,0 +1,1 @@
+{"t":"2026-05-17T00:00:00.000Z","attempt_id":"baseline","score":0,"outcome":"scored","note":"Seeded empty-report baseline; `npm test` scores 0 until insights.json is created.","run_dir":"runs/baseline"}

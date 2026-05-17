@@ -127,6 +127,37 @@ export function engineExecLabel(engine: EngineName): string {
   return `${engineCommand(engine)} exec`;
 }
 
+/**
+ * Args to run the selected engine in non-interactive exec mode. OMX's launch
+ * shorthands (for example --madmax/--xhigh) are not valid after `omx exec`,
+ * so translate the common defaults into Codex exec flags.
+ */
+export function engineExecArgs(
+  engine: EngineName,
+  engineArgs: string[],
+  execArgs: string[] = [],
+): string[] {
+  const normalized = engine === "omx"
+    ? omxLaunchArgsToCodexArgs(engineArgs)
+    : engineArgs;
+  return ["exec", ...normalized, ...execArgs];
+}
+
+/**
+ * Args to run the selected engine interactively for `/goal` injection. OMX must
+ * be direct (not detached tmux) so Darwin can observe process lifetime and feed
+ * stdin, but otherwise keep launch-level OMX flags intact.
+ */
+export function engineInteractiveArgs(
+  engine: EngineName,
+  engineArgs: string[],
+  interactiveArgs: string[] = [],
+): string[] {
+  if (engine !== "omx") return [...engineArgs, ...interactiveArgs];
+
+  return ["--direct", ...stripOmxLaunchPolicyArgs(engineArgs), ...interactiveArgs];
+}
+
 export function formatEngineCommand(
   engine: EngineName,
   engineArgs: string[] = [],
@@ -220,6 +251,79 @@ function splitArgs(raw: string): string[] {
   if (escaping) current += "\\";
   if (current.length > 0) args.push(current);
   return args;
+}
+
+function omxLaunchArgsToCodexArgs(args: string[]): string[] {
+  const out: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+
+    switch (arg) {
+      case "--madmax":
+      case "--yolo":
+        out.push("--dangerously-bypass-approvals-and-sandbox");
+        continue;
+
+      case "--madmax-spark":
+        out.push("--dangerously-bypass-approvals-and-sandbox");
+        continue;
+
+      case "--xhigh":
+        out.push("-c", 'model_reasoning_effort="xhigh"');
+        continue;
+
+      case "--high":
+        out.push("-c", 'model_reasoning_effort="high"');
+        continue;
+
+      // OMX launch-only controls do not make sense for `omx exec`.
+      case "--direct":
+      case "--tmux":
+      case "--detached-tmux":
+      case "--spark":
+      case "--notify-temp":
+      case "--discord":
+      case "--slack":
+      case "--telegram":
+        continue;
+
+      case "--custom":
+      case "-w":
+      case "--worktree":
+        i++; // skip value
+        continue;
+
+      default:
+        if (arg.startsWith("--custom=") || arg.startsWith("--worktree=")) {
+          continue;
+        }
+        out.push(arg);
+    }
+  }
+
+  return out;
+}
+
+function stripOmxLaunchPolicyArgs(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (
+      arg === "--direct" ||
+      arg === "--tmux" ||
+      arg === "--detached-tmux" ||
+      arg.startsWith("--launch-policy=")
+    ) {
+      continue;
+    }
+    if (arg === "--launch-policy") {
+      i++;
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
 }
 
 function shellQuoteIfNeeded(value: string): string {
