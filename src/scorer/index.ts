@@ -1,6 +1,7 @@
 import { stderr } from "node:process";
 import type { ScorerSpec } from "../spec/parse.js";
 import { humanScorer } from "./human.js";
+import { commandScorer } from "./command.js";
 import type { ScoreResult } from "./types.js";
 
 export type { ScoreResult } from "./types.js";
@@ -36,6 +37,8 @@ export async function scoreRun(
         return await humanScorer(scorerSpec);
 
       case "command":
+        return await commandScorer(scorerSpec, runDir);
+
       case "test-suite":
       case "llm-judge":
         stderr.write(

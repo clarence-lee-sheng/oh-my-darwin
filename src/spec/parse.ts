@@ -123,7 +123,7 @@ export function extractScorer(md: string): ScorerSpec {
   const td = parseNumber(fields.threshold_done);
   if (td !== null) spec.threshold_done = td;
 
-  if (fields.command) spec.command = fields.command;
+  if (fields.command) spec.command = stripBackticks(fields.command);
   if (fields.parse) spec.parse = fields.parse;
   if (fields.rubric_path || fields.rubric) {
     spec.rubric_path = fields.rubric_path ?? fields.rubric;
@@ -153,4 +153,10 @@ function parseNumber(s?: string): number | null {
   if (!s) return null;
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
+}
+
+/** Strip a single pair of surrounding markdown backticks (`cmd` → cmd). */
+function stripBackticks(s: string): string {
+  const m = s.match(/^`(.+)`$/);
+  return m ? m[1] : s;
 }
