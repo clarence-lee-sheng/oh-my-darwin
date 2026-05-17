@@ -24,6 +24,12 @@ const TEMPLATE_SPEC = `# oh-my-darwin meta-spec — <slug>
 ## Surface
 <bullets: what the proposer is allowed to vary between iterations>
 
+## Capabilities
+- skills: <allowed | disallowed; project-scoped Codex-compatible SKILL.md only>
+- hooks: <allowed | disallowed; project-scoped .codex/hooks.json entries via darwin-hook only>
+- agents: disallowed
+- promotion: auto-promote validated Darwin-owned skills/hooks; available next iteration
+
 ## Stop condition
 <score threshold OR iteration cap OR both>
 
@@ -80,7 +86,8 @@ extract enough from them that the loop can run.
    review-each / approve-strategy. Ambiguity 0 = pattern + checkpoints
    stated, 1 = unstated.
 5. **surface** — What is the proposer allowed to vary between
-   iterations? Ambiguity 0 = listed, 1 = "anything I guess".
+   iterations, including whether project-scoped skills/hooks are allowed?
+   Ambiguity 0 = listed, 1 = "anything I guess".
 6. **stop** — When should the loop end? Score threshold? Iteration
    cap? Ambiguity 0 = clear, 1 = "when it's good".
 

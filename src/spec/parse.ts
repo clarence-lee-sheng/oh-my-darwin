@@ -43,6 +43,8 @@ export interface SpecSlice {
   slug: string;
   /** Parsed `## Scorer` section, with safe defaults if missing. */
   scorer: ScorerSpec;
+  /** Raw `## Capabilities` section. Defaults are applied by the meta prompt. */
+  capabilities: string;
 }
 
 /**
@@ -63,6 +65,7 @@ export function readSpec(cwd: string = process.cwd()): SpecSlice {
     task: extractSection(raw, "Task"),
     slug: extractSlug(raw),
     scorer: extractScorer(raw),
+    capabilities: extractSection(raw, "Capabilities"),
   };
 }
 

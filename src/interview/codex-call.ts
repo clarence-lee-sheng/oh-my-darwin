@@ -8,6 +8,17 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ENVELOPE_SCHEMA, type Envelope } from "./schema.js";
+import {
+  DEFAULT_ENGINE,
+  engineCommand,
+  engineEnv,
+  engineExecLabel,
+  fallbackEngine,
+  fallbackNotice,
+  isEngineLaunchError,
+  resolveEngineArgs,
+  type EngineName,
+} from "../runtime/engine.js";
 
 export interface Turn {
   role: "user" | "assistant";
@@ -16,12 +27,37 @@ export interface Turn {
 
 /**
  * Single round-trip to the interviewer: serialize the conversation,
- * spawn `codex exec` with the JSON Schema enforced on its output,
+ * spawn `<engine> exec` with the JSON Schema enforced on its output,
  * read the resulting envelope, clean up.
  */
 export async function callInterviewer(
   systemPrompt: string,
   history: Turn[],
+  engine: EngineName = DEFAULT_ENGINE,
+  engineArgs: string[] = resolveEngineArgs(engine),
+): Promise<Envelope> {
+  try {
+    return await callInterviewerOnce(systemPrompt, history, engine, engineArgs);
+  } catch (err) {
+    const fallback = fallbackEngine(engine);
+    if (fallback && isEngineLaunchError(err)) {
+      process.stderr.write(fallbackNotice(engine, fallback, err));
+      return callInterviewerOnce(
+        systemPrompt,
+        history,
+        fallback,
+        resolveEngineArgs(fallback),
+      );
+    }
+    throw err;
+  }
+}
+
+async function callInterviewerOnce(
+  systemPrompt: string,
+  history: Turn[],
+  engine: EngineName,
+  engineArgs: string[],
 ): Promise<Envelope> {
   const dir = mkdtempSync(join(tmpdir(), "hyp-init-"));
   const schemaPath = join(dir, "schema.json");
@@ -35,8 +71,9 @@ export async function callInterviewer(
 
   return new Promise<Envelope>((resolve, reject) => {
     const child = spawn(
-      "codex",
+      engineCommand(engine),
       [
+        ...engineArgs,
         "exec",
         "--output-schema",
         schemaPath,
@@ -47,11 +84,11 @@ export async function callInterviewer(
         "--skip-git-repo-check",
         fullPrompt,
       ],
-      // Swallow stdout (Codex echoes the prompt + status banner there);
+      // Swallow stdout (the agent may echo the prompt + status banner there);
       // we only care about the file at outPath. Capture stderr so a
       // non-zero exit can surface a meaningful message instead of a
       // bare exit code.
-      { stdio: ["ignore", "ignore", "pipe"] },
+      { stdio: ["ignore", "ignore", "pipe"], env: engineEnv(engine) },
     );
 
     let stderrBuf = "";
@@ -69,11 +106,13 @@ export async function callInterviewer(
         if (code !== 0) {
           const tail = stderrBuf.trim().slice(-800);
           throw new Error(
-            `codex exec exited with code ${code}${tail ? `\n${tail}` : ""}`,
+            `${engineExecLabel(engine)} exited with code ${code}${tail ? `\n${tail}` : ""}`,
           );
         }
         const raw = readFileSync(outPath, "utf-8").trim();
-        if (!raw) throw new Error("codex exec produced empty output");
+        if (!raw) {
+          throw new Error(`${engineExecLabel(engine)} produced empty output`);
+        }
         const env = JSON.parse(stripCodeFences(raw)) as Envelope;
         resolve(env);
       } catch (e) {

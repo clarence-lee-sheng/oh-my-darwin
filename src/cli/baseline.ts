@@ -1,7 +1,15 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { stderr } from "node:process";
-import { spawnCodex } from "../runtime/bridge.js";
+import { spawnEngine } from "../runtime/bridge.js";
+import {
+  DEFAULT_ENGINE,
+  engineCommand,
+  engineLabel,
+  formatEngineCommand,
+  resolveEngineArgs,
+  type EngineName,
+} from "../runtime/engine.js";
 import { readSpec } from "../spec/parse.js";
 import { scoreRun } from "../scorer/index.js";
 import { writeFrontier } from "../state/frontier.js";
@@ -14,12 +22,15 @@ import {
 
 /**
  * Run the task described in .darwin/meta-spec.md once, no proposer
- * in play, to establish a starting score. Spawns Codex interactively
- * with the task as the initial prompt; on Codex exit, dispatches to
+ * in play, to establish a starting score. Spawns the selected agent
+ * with the task as the initial prompt; on agent exit, dispatches to
  * the scorer declared in the spec; writes frontier.json + one
  * evolution row + a runs/baseline/ directory.
  */
-export async function baseline(): Promise<void> {
+export async function baseline(
+  engine: EngineName = DEFAULT_ENGINE,
+  engineArgs: string[] = resolveEngineArgs(engine),
+): Promise<void> {
   const cwd = process.cwd();
   const spec = readSpec(cwd);
   if (!spec.task) {
@@ -36,15 +47,17 @@ export async function baseline(): Promise<void> {
   stderr.write(`darwin: baseline run for "${spec.slug || "(unnamed)"}"\n`);
   stderr.write(`darwin: task →\n  ${spec.task.split("\n").join("\n  ")}\n\n`);
   stderr.write(`darwin: scorer source = ${spec.scorer.source}\n`);
-  stderr.write("darwin: launching codex (interactive)\n");
+  stderr.write(
+    `darwin: launching ${formatEngineCommand(engine, engineArgs)} (${engineLabel(engine)}, interactive)\n`,
+  );
 
   const startedAt = Date.now();
-  const { exit } = spawnCodex([spec.task]);
-  const exitCode = await exit;
+  const { exitInfo } = spawnEngine(engine, [spec.task], { engineArgs });
+  const { engine: completedEngine, code: exitCode } = await exitInfo;
   const endedAt = Date.now();
 
   stderr.write(
-    `\ndarwin: codex exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
+    `\ndarwin: ${engineCommand(completedEngine)} exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
   );
 
   // Dispatch to the spec-declared scorer.

@@ -9,8 +9,16 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { stdin, stdout, stderr } from "node:process";
 import { fileURLToPath } from "node:url";
-import { spawnCodex } from "../runtime/bridge.js";
+import { spawnEngine } from "../runtime/bridge.js";
 import { runGoalAttempt } from "../runtime/goal-attempt.js";
+import {
+  DEFAULT_ENGINE,
+  engineCommand,
+  engineLabel,
+  formatEngineCommand,
+  resolveEngineArgs,
+  type EngineName,
+} from "../runtime/engine.js";
 import { readSpec, type SpecSlice } from "../spec/parse.js";
 import { scoreRun } from "../scorer/index.js";
 import { readFrontier, writeFrontier } from "../state/frontier.js";
@@ -21,6 +29,14 @@ import {
 } from "../state/history.js";
 import { loadAndValidate, type Harness } from "../harness/load.js";
 import { invokeProposer } from "../proposer/invoke.js";
+import { resolveCurrentProject } from "../projects/registry.js";
+import {
+  discoverCapabilities,
+  formatCapabilitiesForPrompt,
+  promoteCapabilities,
+  validateCapabilityProposal,
+  type ValidatedCapabilityBundle,
+} from "../capabilities/manifest.js";
 import {
   buildGoalProposerPrompt,
   invokeGoalProposer,
@@ -47,6 +63,8 @@ import { readNiches, writeNiches } from "../state/niches.js";
 import { init } from "./init.js";
 import { baseline } from "./baseline.js";
 import {
+  CAPABILITY_MANIFEST_FILE,
+  CAPABILITIES_DIR,
   DARWIN_DIR,
   HARNESS_DIR,
   HARNESS_FILE,
@@ -170,13 +188,17 @@ function formatDuration(ms: number): string {
 }
 
 interface ProposerPromptArgs {
+  engine: EngineName;
   task: string;
   currentHarness: string;
   frontierAttempt: string;
   frontierScore: number | null;
   priorHint?: string;
+  specCapabilities?: string;
+  capabilitiesContext: string;
   proposalDirRel: string;
   proposalPathRel: string;
+  proposalManifestRel: string;
   parents?: ParentAttempt[];
   mutationDirective?: string;
 }
@@ -208,8 +230,8 @@ function buildProposerPrompt(a: ProposerPromptArgs): string {
 that you believe will improve the score on this task.
 
 The harness is an ESM JavaScript module (.mjs) that controls how the task
-is presented to Codex when the executor runs. The current harness is shown
-below.
+is presented to ${engineLabel(a.engine)} when the executor runs. The current
+harness is shown below.
 
 TASK:
 ${a.task}
@@ -223,11 +245,21 @@ CURRENT HARNESS (.darwin/harness/harness.mjs):
 ${a.currentHarness}
 \`\`\`
 ${hintBlock}${parentsBlock}${directiveBlock}
+SPEC CAPABILITY POLICY:
+${a.specCapabilities?.trim() || "- skills: allowed (project-scoped Codex-compatible SKILL.md)\n- hooks: allowed (project-scoped darwin-hook entries)\n- agents: disallowed\n- promotion: auto-promote validated skills/hooks for next iteration"}
+
+PROJECT CAPABILITIES AVAILABLE THIS ITERATION:
+${a.capabilitiesContext}
+
+Capability availability rule:
+- Only capabilities already listed above may be assumed by this iteration.
+- Any new skill/hook you propose now is staged and may become available next iteration only.
+
 YOUR ACTIONS:
 - Read .darwin/evolution.jsonl and any .darwin/runs/*/ trajectories to
   understand what's been tried and what failed.
 - Read .darwin/proposals/iter-*/harness.mjs to see prior candidates.
-- Then Write exactly ONE file at: ${a.proposalPathRel}
+- Then write exactly ONE file at: ${a.proposalPathRel}
   The file must default-export an object with a buildPrompt(task) method
   that returns a non-empty string. It is plain ESM JavaScript — no
   TypeScript syntax, no transpile step. Use JSDoc for any type hints.
@@ -238,12 +270,36 @@ YOUR ACTIONS:
 - Do not modify any other file (no edits to .darwin/harness/, no edits to
   prior runs/proposals).
 
+OPTIONAL PROJECT-SCOPED CAPABILITIES:
+- You may also write ${a.proposalManifestRel} plus files under
+  .darwin/${a.proposalDirRel}/${CAPABILITIES_DIR}/ if a reusable project
+  skill or Codex hook would help future iterations.
+- Do not create agents in this phase.
+- Skills must be Codex-compatible SKILL.md files staged under:
+  .darwin/${a.proposalDirRel}/${CAPABILITIES_DIR}/skills/<skill-name>/SKILL.md
+  with YAML frontmatter containing name and description.
+- Hooks must be project-scoped Codex hook entries whose command is exactly
+  "darwin-hook <event>". Hooks may be observe or block_or_allow, but arbitrary
+  shell commands are never safe.
+- If you create capabilities, write JSON:
+  {
+    "version": 1,
+    "capabilities": [
+      {"kind":"skill","name":"example","path":"${CAPABILITIES_DIR}/skills/example/SKILL.md"},
+      {"kind":"hook","name":"example-hook","event":"pre_tool_use","command":"darwin-hook pre_tool_use","mode":"observe"}
+    ]
+  }
+
 Write a one-sentence hypothesis at the top of the file as a // comment.
 
 Exit when the file is written.`;
 }
 
-export async function meta(args: string[]): Promise<void> {
+export async function meta(
+  args: string[],
+  engine: EngineName = DEFAULT_ENGINE,
+  engineArgs: string[] = resolveEngineArgs(engine),
+): Promise<void> {
   const opts = parseLoopOptions(args);
   const cwd = process.cwd();
 
@@ -258,7 +314,7 @@ export async function meta(args: string[]): Promise<void> {
       stderr.write("darwin: aborting. Run `darwin init` when ready.\n");
       return;
     }
-    await init();
+    await init(engine, engineArgs);
     if (!existsSync(specPath)) {
       throw new Error("init did not produce meta-spec.md; aborting");
     }
@@ -275,7 +331,7 @@ export async function meta(args: string[]): Promise<void> {
   let front = readFrontier(cwd);
   if (!front) {
     stderr.write("darwin: no frontier found, running baseline first\n");
-    await baseline();
+    await baseline(engine, engineArgs);
     front = readFrontier(cwd);
     if (!front) {
       throw new Error("baseline did not produce a frontier; aborting");
@@ -322,7 +378,7 @@ export async function meta(args: string[]): Promise<void> {
 
     const outcome = opts.goalMode
       ? await runGoalIteration(i, cwd, spec, opts)
-      : await runIteration(i, cwd, spec);
+      : await runIteration(i, cwd, spec, engine, engineArgs);
 
     // Stop: too many consecutive validation failures
     if (outcome === "rejected" || outcome === "failed") {
@@ -417,6 +473,8 @@ async function runIteration(
   i: number,
   cwd: string,
   spec: SpecSlice,
+  engine: EngineName,
+  engineArgs: string[],
 ): Promise<IterationOutcome> {
   const task = spec.task;
   const attemptId = `iter-${i}`;
@@ -424,11 +482,16 @@ async function runIteration(
   const proposalDirRel = `${PROPOSALS_DIR}/${attemptId}`;
   const proposalHarness = join(proposalDir, HARNESS_FILE);
   const proposalHarnessRel = `${DARWIN_DIR}/${proposalDirRel}/${HARNESS_FILE}`;
+  const proposalManifestRel = `${DARWIN_DIR}/${proposalDirRel}/${CAPABILITY_MANIFEST_FILE}`;
   mkdirSync(proposalDir, { recursive: true });
 
   const front = readFrontier(cwd)!;
   const currentHarness = readFileSync(harnessPath(cwd), "utf-8");
   const priorHint = readLastEvolutionHint(cwd);
+  const project = resolveCurrentProject(cwd);
+  const capabilitiesContext = formatCapabilitiesForPrompt(
+    discoverCapabilities(cwd, project),
+  );
 
   // Strategy: load current harness's hooks, build ctx, ask for parents + directive.
   const frontierHooks = await loadFrontierHarness(cwd);
@@ -449,21 +512,25 @@ async function runIteration(
   );
 
   const proposerPrompt = buildProposerPrompt({
+    engine,
     task,
     currentHarness,
     frontierAttempt: front.attempt_id,
     frontierScore: front.score,
     priorHint,
+    specCapabilities: spec.capabilities,
+    capabilitiesContext,
     proposalDirRel,
     proposalPathRel: proposalHarnessRel,
+    proposalManifestRel,
     parents,
     mutationDirective,
   });
 
   // 1. Propose
-  stderr.write("darwin: invoking proposer (codex)...\n");
+  stderr.write(`darwin: invoking proposer (${formatEngineCommand(engine, engineArgs)})...\n`);
   try {
-    await invokeProposer(proposerPrompt, proposalHarness);
+    await invokeProposer(proposerPrompt, proposalHarness, engine, engineArgs);
   } catch (e) {
     stderr.write(`darwin: proposer failed: ${e}\n`);
     appendEvolution(
@@ -480,6 +547,25 @@ async function runIteration(
   }
 
   // 2. Validate
+  let capabilityBundle: ValidatedCapabilityBundle | null = null;
+  try {
+    capabilityBundle = validateCapabilityProposal(cwd, proposalDir, project);
+  } catch (e) {
+    stderr.write(`darwin: candidate ${attemptId} rejected (capabilities: ${e})\n`);
+    appendEvolution(
+      {
+        t: new Date().toISOString(),
+        attempt_id: attemptId,
+        score: null,
+        outcome: "rejected",
+        note: `capability validation: ${String(e).slice(0, 200)}`,
+        run_dir: proposalDirRel,
+      },
+      cwd,
+    );
+    return "rejected";
+  }
+
   let harness: Harness;
   try {
     harness = await loadAndValidate(proposalHarness);
@@ -531,13 +617,15 @@ async function runIteration(
   writeFileSync(join(runDir, "prompt.txt"), prompt);
   writeFileSync(join(runDir, "task.md"), task + "\n");
 
-  stderr.write("darwin: launching codex (interactive) with candidate harness\n");
+  stderr.write(
+    `darwin: launching ${formatEngineCommand(engine, engineArgs)} (${engineLabel(engine)}, interactive) with candidate harness\n`,
+  );
   const startedAt = Date.now();
-  const { exit } = spawnCodex([prompt]);
-  const exitCode = await exit;
+  const { exitInfo } = spawnEngine(engine, [prompt], { engineArgs });
+  const { engine: completedEngine, code: exitCode } = await exitInfo;
   const endedAt = Date.now();
   stderr.write(
-    `darwin: codex exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
+    `darwin: ${engineCommand(completedEngine)} exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
   );
 
   // 4. Score (dispatched per meta-spec.md's `## Scorer` section)
@@ -556,11 +644,36 @@ async function runIteration(
     }
   }
 
-  // 6. Record
+  // 6. Promote validated capabilities for the NEXT iteration.
+  let capabilityNote: string | undefined;
+  try {
+    const promotion = promoteCapabilities(cwd, capabilityBundle, project);
+    if (promotion.promoted.length > 0) {
+      capabilityNote = `capabilities promoted for next iteration: ${promotion.promoted.join(", ")}`;
+      stderr.write(`darwin: ${capabilityNote}\n`);
+    }
+  } catch (e) {
+    stderr.write(`darwin: capability promotion failed: ${e}\n`);
+    appendEvolution(
+      {
+        t: new Date().toISOString(),
+        attempt_id: attemptId,
+        score: null,
+        outcome: "failed",
+        note: `capability promotion: ${String(e).slice(0, 200)}`,
+        run_dir: runDirRel,
+      },
+      cwd,
+    );
+    return "failed";
+  }
+
+  // 7. Record
   const t = new Date().toISOString();
   const outcome = score === null ? "skipped" : "scored";
   const front2 = readFrontier(cwd)!;
   const delta = score !== null && front2.score !== null ? score - front2.score : undefined;
+  const finalNote = [note, capabilityNote].filter(Boolean).join("\n");
 
   appendEvolution(
     {
@@ -568,7 +681,7 @@ async function runIteration(
       attempt_id: attemptId,
       score,
       outcome,
-      note,
+      note: finalNote,
       run_dir: runDirRel,
       delta,
       next_hint: nextHint,
