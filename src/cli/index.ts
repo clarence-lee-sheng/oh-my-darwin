@@ -104,7 +104,9 @@ usage:
   darwin [agent args...]         auto-install hooks, then launch selected engine
   darwin init                    start a new meta-loop project (interview)
   darwin baseline                run the task once, record initial score
-  darwin meta [--iterations N]   propose → execute → score → repeat (default 1)
+  darwin meta [--iterations N] [--duration 90s|30m|2h|1d] [--interactive]
+                                 propose → execute → score → repeat
+                                 (default: unbounded; runs until user stops or proposer stuck)
   darwin setup                   (re)install .codex/hooks.json
   darwin hook <event>            handler invoked by .codex/hooks.json
 
