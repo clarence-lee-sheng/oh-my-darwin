@@ -10,7 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import { stdin, stdout, stderr } from "node:process";
 import { fileURLToPath } from "node:url";
 import { spawnEngine } from "../runtime/bridge.js";
-import { runGoalAttempt } from "../runtime/goal-attempt.js";
+import { runGoalAttempt, type GoalRunner } from "../runtime/goal-attempt.js";
 import {
   DEFAULT_ENGINE,
   engineCommand,
@@ -119,6 +119,8 @@ interface LoopOptions {
   attemptMaxMs: number;
   /** Quiet period in ms before goal is considered done (goal-mode only). */
   attemptQuietMs: number;
+  /** Goal-mode execution primitive. */
+  goalRunner: GoalRunner;
 }
 
 const MAX_CONSECUTIVE_FAILURES = 3;
@@ -158,7 +160,15 @@ function parseLoopOptions(args: string[]): LoopOptions {
     else throw new Error(`invalid --attempt-quiet value: ${args[quietIdx + 1] ?? ""} (use forms like 30s, 2m)`);
   }
 
-  return { maxIterations, maxDurationMs, interactive, goalMode, attemptMaxMs, attemptQuietMs };
+  let goalRunner: GoalRunner = "exec";
+  const runnerIdx = args.indexOf("--goal-runner");
+  if (runnerIdx !== -1) {
+    const raw = args[runnerIdx + 1] ?? "";
+    if (raw === "exec" || raw === "slash") goalRunner = raw;
+    else throw new Error(`invalid --goal-runner value: ${raw} (expected exec or slash)`);
+  }
+
+  return { maxIterations, maxDurationMs, interactive, goalMode, attemptMaxMs, attemptQuietMs, goalRunner };
 }
 
 /**
@@ -848,6 +858,7 @@ async function runGoalIteration(
     engine,
     engineArgs,
     knobs: candidate.knobs,
+    runner: opts.goalRunner,
     maxDurationMs: opts.attemptMaxMs,
     quietMs: opts.attemptQuietMs,
     trajectoryPath: join(runDir, "trajectory.json"),

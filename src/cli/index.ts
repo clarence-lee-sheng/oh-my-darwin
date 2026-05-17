@@ -123,11 +123,14 @@ usage:
   darwin baseline                run the task once, record initial score
   darwin meta [--iterations N] [--duration 90s|30m|2h|1d] [--interactive]
               [--goal-mode] [--attempt-max 30m] [--attempt-quiet 60s]
+              [--goal-runner exec|slash]
                                  propose → execute → score → repeat
                                  (default: unbounded; runs until user stops or proposer stuck)
                                  --goal-mode: use Codex /goal as the attempt primitive
                                               (proposer outputs goal+knobs instead of a harness)
                                               honors --omx/--codex engine selection
+                                 --goal-runner: exec is stable default; slash keeps
+                                                experimental interactive /goal injection
   darwin status                  show project/frontier/capability status
   darwin projects                list ~/.darwin registered projects
   darwin capabilities            list active/stale project capabilities

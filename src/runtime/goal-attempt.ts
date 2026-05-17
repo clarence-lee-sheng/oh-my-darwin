@@ -1,5 +1,16 @@
 import { spawn } from "node:child_process";
-import { existsSync, statSync, openSync, readSync, closeSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  statSync,
+  openSync,
+  readSync,
+  closeSync,
+  writeFileSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stderr } from "node:process";
 import { DARWIN_DIR, EVENTS_LOG } from "../cli/constants.js";
@@ -7,16 +18,23 @@ import {
   DEFAULT_ENGINE,
   engineCommand,
   engineEnv,
+  engineExecArgs,
   engineInteractiveArgs,
   formatEngineCommand,
+  hasApprovalArg,
+  hasBypassApprovalsAndSandbox,
+  hasSandboxArg,
   resolveEngineArgs,
   type EngineName,
 } from "./engine.js";
 
+export type GoalRunner = "exec" | "slash";
+
 export type GoalExitReason =
   | "quiet"          // no new tool/prompt activity within quietMs after last `stop`
   | "time_cap"       // hit hard wall-clock cap
-  | "codex_exit"     // codex exited on its own
+  | "engine_exit"    // selected engine exited on its own
+  | "codex_exit"     // legacy name for interactive codex/omx TUI exit
   | "error";         // spawn or io error
 
 export interface GoalAttemptResult {
@@ -39,6 +57,11 @@ export interface GoalAttemptOptions {
   engine?: EngineName;
   /** Engine/launch args selected by Darwin's CLI config. */
   engineArgs?: string[];
+  /**
+   * Execution primitive. `exec` is the stable default for automation; `slash`
+   * keeps the original interactive `/goal` injection path for manual debugging.
+   */
+  runner?: GoalRunner;
   /** Per-attempt knobs forwarded to codex CLI flags. */
   knobs?: {
     model?: string;
@@ -62,6 +85,7 @@ export interface GoalAttemptOptions {
 }
 
 const DEFAULTS = {
+  runner: "exec" as GoalRunner,
   maxDurationMs: 30 * 60 * 1000,
   quietMs: 60_000,
   gracefulMs: 5_000,
@@ -85,32 +109,12 @@ export async function runGoalAttempt(
   const engine = opts.engine ?? DEFAULT_ENGINE;
   const selectedEngineArgs = opts.engineArgs ?? resolveEngineArgs(engine);
 
-  // Build engine argv. No PROMPT arg — we inject /goal via stdin after warmup.
-  const goalArgs: string[] = [];
-  if (opts.knobs?.model) goalArgs.push("-m", opts.knobs.model);
-  const bypassesApprovalsAndSandbox = hasBypassApprovalsAndSandbox(selectedEngineArgs);
-  if (bypassesApprovalsAndSandbox) {
-    if (opts.knobs?.sandbox || opts.knobs?.approval) {
-      stderr.write(
-        "darwin: engine args already bypass approvals/sandbox; ignoring proposed sandbox/approval knobs for this goal attempt\n",
-      );
-    }
-  } else {
-    if (opts.knobs?.sandbox) {
-      if (hasSandboxArg(selectedEngineArgs)) {
-        stderr.write("darwin: engine args already set sandbox; ignoring proposed sandbox knob\n");
-      } else {
-        goalArgs.push("-s", opts.knobs.sandbox);
-      }
-    }
-    if (opts.knobs?.approval) {
-      if (hasApprovalArg(selectedEngineArgs)) {
-        stderr.write("darwin: engine args already set approval policy; ignoring proposed approval knob\n");
-      } else {
-        goalArgs.push("-a", opts.knobs.approval);
-      }
-    }
+  if (cfg.runner === "exec") {
+    return runExecGoalAttempt(opts, cfg, engine, selectedEngineArgs, startedAt);
   }
+
+  // Build engine argv. No PROMPT arg — we inject /goal via stdin after warmup.
+  const goalArgs = goalKnobArgs(opts.knobs, selectedEngineArgs);
   // Preserve scrollback and make scripted `/goal` injection easier to debug.
   goalArgs.push("--no-alt-screen");
   const launchArgs = engineInteractiveArgs(engine, selectedEngineArgs, goalArgs);
@@ -268,6 +272,163 @@ export async function runGoalAttempt(
   return result;
 }
 
+async function runExecGoalAttempt(
+  opts: GoalAttemptOptions,
+  cfg: typeof DEFAULTS & GoalAttemptOptions,
+  engine: EngineName,
+  selectedEngineArgs: string[],
+  startedAt: number,
+): Promise<GoalAttemptResult> {
+  const tmp = mkdtempSync(join(tmpdir(), "darwin-goal-attempt-"));
+  const lastMsgPath = join(tmp, "last.txt");
+  const eventsPath = resolve(opts.cwd, DARWIN_DIR, EVENTS_LOG);
+  const tail = startTail(eventsPath);
+  const execPrompt = buildExecGoalPrompt(opts.goal, cfg.maxDurationMs);
+  const execArgs = engineExecArgs(engine, selectedEngineArgs, [
+    ...goalKnobArgs(opts.knobs, selectedEngineArgs),
+    "--skip-git-repo-check",
+    "--output-last-message",
+    lastMsgPath,
+    "--color",
+    "never",
+    "-",
+  ]);
+
+  stderr.write(
+    `darwin: spawning ${formatEngineCommand(engine, execArgs)} for goal attempt (runner=exec, model=${opts.knobs?.model ?? "default"}, sandbox=${opts.knobs?.sandbox ?? "default"})\n`,
+  );
+
+  let exitCode: number | null = null;
+  let spawnError: Error | null = null;
+  let timedOut = false;
+
+  try {
+    const child = spawn(engineCommand(engine), execArgs, {
+      cwd: opts.cwd,
+      env: engineEnv(engine),
+      stdio: ["pipe", "inherit", "inherit"],
+    });
+
+    child.on("error", (e) => {
+      spawnError = e;
+    });
+    child.stdin?.end(execPrompt + "\n");
+
+    const exitPromise = new Promise<void>((res) => {
+      child.on("exit", (code) => {
+        exitCode = code;
+        res();
+      });
+    });
+
+    const timeout = sleep(cfg.maxDurationMs).then(() => "timeout" as const);
+    const winner = await Promise.race([exitPromise.then(() => "exit" as const), timeout]);
+    if (winner === "timeout") {
+      timedOut = true;
+      stderr.write("darwin: goal attempt time_cap — terminating exec runner\n");
+      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+      await Promise.race([exitPromise, sleep(cfg.gracefulMs)]);
+      if (exitCode === null) {
+        try { child.kill("SIGKILL"); } catch { /* ignore */ }
+        await exitPromise;
+      }
+    }
+
+    const lastAssistantMessage = existsSync(lastMsgPath)
+      ? readFileSync(lastMsgPath, "utf-8")
+      : undefined;
+    const result: GoalAttemptResult = {
+      exitReason: spawnError ? "error" : timedOut ? "time_cap" : "engine_exit",
+      durationMs: Date.now() - startedAt,
+      lastAssistantMessage,
+      eventCounts: tail.counts,
+      exitCode,
+    };
+    writeTrajectory(opts, {
+      engine,
+      selectedEngineArgs,
+      runner: "exec",
+      startedAt,
+      result,
+    });
+    return result;
+  } finally {
+    tail.close();
+    try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+function goalKnobArgs(
+  knobs: GoalAttemptOptions["knobs"],
+  selectedEngineArgs: string[],
+): string[] {
+  const args: string[] = [];
+  if (knobs?.model) args.push("-m", knobs.model);
+
+  const bypassesApprovalsAndSandbox = hasBypassApprovalsAndSandbox(selectedEngineArgs);
+  if (bypassesApprovalsAndSandbox) {
+    if (knobs?.sandbox || knobs?.approval) {
+      stderr.write(
+        "darwin: engine args already bypass approvals/sandbox; ignoring proposed sandbox/approval knobs for this goal attempt\n",
+      );
+    }
+    return args;
+  }
+
+  if (knobs?.sandbox) {
+    if (hasSandboxArg(selectedEngineArgs)) {
+      stderr.write("darwin: engine args already set sandbox; ignoring proposed sandbox knob\n");
+    } else {
+      args.push("-s", knobs.sandbox);
+    }
+  }
+  if (knobs?.approval) {
+    if (hasApprovalArg(selectedEngineArgs)) {
+      stderr.write("darwin: engine args already set approval policy; ignoring proposed approval knob\n");
+    } else {
+      args.push("-a", knobs.approval);
+    }
+  }
+  return args;
+}
+
+function buildExecGoalPrompt(goal: string, maxDurationMs: number): string {
+  return `You are running inside Darwin goal-mode using the stable non-interactive exec runner. Treat the following as the exact goal objective you must autonomously pursue. Work until the goal is satisfied or until the external Darwin time cap of about ${Math.round(maxDurationMs / 1000)} seconds interrupts you. When you stop, summarize concrete actions, artifacts, evidence, and any measured outcome.\n\nGOAL:\n${goal}`;
+}
+
+function writeTrajectory(
+  opts: GoalAttemptOptions,
+  a: {
+    engine: EngineName;
+    selectedEngineArgs: string[];
+    runner: GoalRunner;
+    startedAt: number;
+    result: GoalAttemptResult;
+  },
+): void {
+  if (!opts.trajectoryPath) return;
+  try {
+    writeFileSync(
+      opts.trajectoryPath,
+      JSON.stringify(
+        {
+          engine: a.engine,
+          engine_args: a.selectedEngineArgs,
+          runner: a.runner,
+          goal: opts.goal,
+          knobs: opts.knobs ?? {},
+          started_at: new Date(a.startedAt).toISOString(),
+          ended_at: new Date().toISOString(),
+          ...a.result,
+        },
+        null,
+      ) + "\n",
+    );
+  } catch {
+    /* trajectory write is best-effort */
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
 }
@@ -292,33 +453,6 @@ function ptyLaunchCommand(command: string, args: string[]): {
     };
   }
   return { command, args, ptyWrapped: false };
-}
-
-function hasBypassApprovalsAndSandbox(args: string[]): boolean {
-  return args.some((arg) =>
-    arg === "--dangerously-bypass-approvals-and-sandbox" ||
-    arg === "--madmax" ||
-    arg === "--madmax-spark" ||
-    arg === "--yolo"
-  );
-}
-
-function hasSandboxArg(args: string[]): boolean {
-  return hasOption(args, "-s", "--sandbox");
-}
-
-function hasApprovalArg(args: string[]): boolean {
-  return hasOption(args, "-a", "--ask-for-approval");
-}
-
-function hasOption(args: string[], shortName: string, longName: string): boolean {
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === shortName || arg === longName || arg.startsWith(`${longName}=`)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 const PYTHON_PTY_BRIDGE = String.raw`

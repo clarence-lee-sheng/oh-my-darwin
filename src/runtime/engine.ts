@@ -140,7 +140,7 @@ export function engineExecArgs(
   const normalized = engine === "omx"
     ? omxLaunchArgsToCodexArgs(engineArgs)
     : engineArgs;
-  return ["exec", ...normalized, ...execArgs];
+  return ["exec", ...normalizeBypassConflicts([...normalized, ...execArgs])];
 }
 
 /**
@@ -153,9 +153,71 @@ export function engineInteractiveArgs(
   engineArgs: string[],
   interactiveArgs: string[] = [],
 ): string[] {
-  if (engine !== "omx") return [...engineArgs, ...interactiveArgs];
+  if (engine !== "omx") {
+    return normalizeBypassConflicts([...engineArgs, ...interactiveArgs]);
+  }
 
-  return ["--direct", ...stripOmxLaunchPolicyArgs(engineArgs), ...interactiveArgs];
+  return [
+    "--direct",
+    ...normalizeBypassConflicts([
+      ...stripOmxLaunchPolicyArgs(engineArgs),
+      ...interactiveArgs,
+    ]),
+  ];
+}
+
+export function hasBypassApprovalsAndSandbox(args: string[]): boolean {
+  return args.some((arg) =>
+    arg === "--dangerously-bypass-approvals-and-sandbox" ||
+    arg === "--madmax" ||
+    arg === "--madmax-spark" ||
+    arg === "--yolo"
+  );
+}
+
+export function hasSandboxArg(args: string[]): boolean {
+  return hasOption(args, "-s", "--sandbox");
+}
+
+export function hasApprovalArg(args: string[]): boolean {
+  return hasOption(args, "-a", "--ask-for-approval");
+}
+
+/**
+ * Use this before appending a caller-owned sandbox/approval policy, such as the
+ * init interviewer read-only sandbox. It removes any existing bypass,
+ * sandbox, and approval flags while preserving model/reasoning flags.
+ */
+export function stripApprovalSandboxArgs(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (
+      arg === "--dangerously-bypass-approvals-and-sandbox" ||
+      arg === "--madmax" ||
+      arg === "--madmax-spark" ||
+      arg === "--yolo" ||
+      arg === "-s" ||
+      arg === "--sandbox" ||
+      arg === "-a" ||
+      arg === "--ask-for-approval"
+    ) {
+      if (
+        arg === "-s" ||
+        arg === "--sandbox" ||
+        arg === "-a" ||
+        arg === "--ask-for-approval"
+      ) {
+        i++;
+      }
+      continue;
+    }
+    if (arg.startsWith("--sandbox=") || arg.startsWith("--ask-for-approval=")) {
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
 }
 
 export function formatEngineCommand(
@@ -324,6 +386,38 @@ function stripOmxLaunchPolicyArgs(args: string[]): string[] {
     out.push(arg);
   }
   return out;
+}
+
+function normalizeBypassConflicts(args: string[]): string[] {
+  if (!hasBypassApprovalsAndSandbox(args)) return args;
+
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (
+      arg === "-s" ||
+      arg === "--sandbox" ||
+      arg === "-a" ||
+      arg === "--ask-for-approval"
+    ) {
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--sandbox=") || arg.startsWith("--ask-for-approval=")) {
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
+function hasOption(args: string[], shortName: string, longName: string): boolean {
+  for (const arg of args) {
+    if (arg === shortName || arg === longName || arg.startsWith(`${longName}=`)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function shellQuoteIfNeeded(value: string): string {

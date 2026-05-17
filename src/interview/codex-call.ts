@@ -12,11 +12,13 @@ import {
   DEFAULT_ENGINE,
   engineCommand,
   engineEnv,
+  engineExecArgs,
   engineExecLabel,
   fallbackEngine,
   fallbackNotice,
   isEngineLaunchError,
   resolveEngineArgs,
+  stripApprovalSandboxArgs,
   type EngineName,
 } from "../runtime/engine.js";
 
@@ -68,22 +70,25 @@ async function callInterviewerOnce(
     .map((h) => `### ${h.role.toUpperCase()}\n${h.content}`)
     .join("\n\n");
   const fullPrompt = `${systemPrompt}\n\n## Conversation so far\n\n${convo}\n\n## Your turn\n\nReturn the JSON envelope now.`;
+  const execArgs = engineExecArgs(
+    engine,
+    stripApprovalSandboxArgs(engineArgs),
+    [
+      "--output-schema",
+      schemaPath,
+      "--output-last-message",
+      outPath,
+      "--sandbox",
+      "read-only",
+      "--skip-git-repo-check",
+      fullPrompt,
+    ],
+  );
 
   return new Promise<Envelope>((resolve, reject) => {
     const child = spawn(
       engineCommand(engine),
-      [
-        ...engineArgs,
-        "exec",
-        "--output-schema",
-        schemaPath,
-        "--output-last-message",
-        outPath,
-        "--sandbox",
-        "read-only",
-        "--skip-git-repo-check",
-        fullPrompt,
-      ],
+      execArgs,
       // Swallow stdout (the agent may echo the prompt + status banner there);
       // we only care about the file at outPath. Capture stderr so a
       // non-zero exit can surface a meaningful message instead of a
