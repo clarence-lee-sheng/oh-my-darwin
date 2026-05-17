@@ -351,13 +351,18 @@ function omxLaunchArgsToCodexArgs(args: string[]): string[] {
         continue;
 
       case "--custom":
+      case "--launch-policy":
       case "-w":
       case "--worktree":
         i++; // skip value
         continue;
 
       default:
-        if (arg.startsWith("--custom=") || arg.startsWith("--worktree=")) {
+        if (
+          arg.startsWith("--custom=") ||
+          arg.startsWith("--worktree=") ||
+          arg.startsWith("--launch-policy=")
+        ) {
           continue;
         }
         out.push(arg);

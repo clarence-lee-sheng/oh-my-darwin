@@ -20,10 +20,13 @@ import {
   engineEnv,
   engineExecArgs,
   engineInteractiveArgs,
+  fallbackEngine,
+  fallbackNotice,
   formatEngineCommand,
   hasApprovalArg,
   hasBypassApprovalsAndSandbox,
   hasSandboxArg,
+  isEngineLaunchError,
   resolveEngineArgs,
   type EngineName,
 } from "./engine.js";
@@ -110,13 +113,9 @@ export async function runGoalAttempt(
   const startedAt = Date.now();
   const engine = opts.engine ?? DEFAULT_ENGINE;
   const selectedEngineArgs = opts.engineArgs ?? resolveEngineArgs(engine);
-  const mode = resolveGoalAttemptMode(opts.mode);
+  const mode = resolveGoalAttemptMode(opts.runner ?? opts.mode);
   if (mode === "exec") {
     return runExecGoalAttempt(cfg, engine, selectedEngineArgs, startedAt);
-  }
-
-  if (cfg.runner === "exec") {
-    return runExecGoalAttempt(opts, cfg, engine, selectedEngineArgs, startedAt);
   }
 
   // Build engine argv. No PROMPT arg — we inject /goal via stdin after warmup.
@@ -285,112 +284,124 @@ async function runExecGoalAttempt(
   selectedEngineArgs: string[],
   startedAt: number,
 ): Promise<GoalAttemptResult> {
-  const execArgs: string[] = [];
-  if (cfg.knobs?.model) execArgs.push("-m", cfg.knobs.model);
-  const bypassesApprovalsAndSandbox = hasBypassApprovalsAndSandbox(selectedEngineArgs);
-  if (bypassesApprovalsAndSandbox) {
-    if (cfg.knobs?.sandbox || cfg.knobs?.approval) {
-      stderr.write(
-        "darwin: engine args already bypass approvals/sandbox; ignoring proposed sandbox/approval knobs for this goal attempt\n",
-      );
-    }
-  } else {
-    if (cfg.knobs?.sandbox) {
-      if (hasSandboxArg(selectedEngineArgs)) {
-        stderr.write("darwin: engine args already set sandbox; ignoring proposed sandbox knob\n");
-      } else {
-        execArgs.push("-s", cfg.knobs.sandbox);
-      }
-    }
-    if (cfg.knobs?.approval) {
-      if (hasApprovalArg(selectedEngineArgs)) {
-        stderr.write("darwin: engine args already set approval policy; ignoring proposed approval knob\n");
-      } else {
-        execArgs.push("-a", cfg.knobs.approval);
-      }
-    }
-  }
-
-  const lastMsgPath = cfg.trajectoryPath
-    ? resolve(cfg.trajectoryPath, "..", "last_message.txt")
-    : undefined;
-  if (lastMsgPath) execArgs.push("--output-last-message", lastMsgPath);
-  execArgs.push("--color", "never", "-");
-
-  const launchArgs = engineExecArgs(engine, selectedEngineArgs, execArgs);
-  const prompt = buildExecGoalPrompt(cfg.goal);
-  stderr.write(
-    `darwin: spawning ${formatEngineCommand(engine, launchArgs)} for non-interactive goal attempt (model=${cfg.knobs?.model ?? "default"}, sandbox=${cfg.knobs?.sandbox ?? "default"})\n`,
-  );
+  const tmp = mkdtempSync(join(tmpdir(), "darwin-goal-attempt-"));
+  const lastMsgPath = join(tmp, "last.txt");
+  const launchArgs = engineExecArgs(engine, selectedEngineArgs, [
+    ...goalKnobArgs(cfg.knobs, selectedEngineArgs),
+    "--skip-git-repo-check",
+    "--output-last-message",
+    lastMsgPath,
+    "--color",
+    "never",
+    "-",
+  ]);
+  const prompt = buildExecGoalPrompt(cfg.goal, cfg.maxDurationMs);
 
   const eventsPath = resolve(cfg.cwd, DARWIN_DIR, EVENTS_LOG);
   const tail = startTail(eventsPath);
   let exitCode: number | null = null;
   let spawnError: Error | null = null;
   let timedOut = false;
-
-  await new Promise<void>((res) => {
-    const child = spawn(engineCommand(engine), launchArgs, {
-      cwd: cfg.cwd,
-      env: engineEnv(engine),
-      stdio: ["pipe", "inherit", "inherit"],
-    });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      stderr.write(`darwin: goal attempt hit ${Math.round(cfg.maxDurationMs / 1000)}s cap — terminating exec child\n`);
-      try { child.kill("SIGTERM"); } catch { /* ignore */ }
-      setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch { /* ignore */ }
-      }, cfg.gracefulMs).unref();
-    }, cfg.maxDurationMs);
-    child.stdin?.end(prompt + "\n");
-    child.on("error", (e) => { spawnError = e; });
-    child.on("exit", (code) => {
-      clearTimeout(timer);
-      exitCode = code;
-      res();
-    });
-  });
-
-  const drained = tail.drain();
-  tail.close();
-  const lastAssistantMessage = drained
-    .map((ev) => typeof ev.last_assistant_message === "string" ? ev.last_assistant_message : undefined)
-    .filter((v): v is string => Boolean(v))
-    .at(-1);
-  const result: GoalAttemptResult = {
-    exitReason: spawnError ? "error" : timedOut ? "time_cap" : "codex_exit",
-    durationMs: Date.now() - startedAt,
-    lastAssistantMessage,
-    eventCounts: tail.counts,
-    exitCode,
+  let closed = false;
+  const cleanup = () => {
+    if (!closed) {
+      closed = true;
+      tail.close();
+    }
+    try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
   };
 
-  if (cfg.trajectoryPath) {
-    try {
-      writeFileSync(
-        cfg.trajectoryPath,
-        JSON.stringify(
-          {
-            engine,
-            engine_args: selectedEngineArgs,
-            goal: cfg.goal,
-            mode: "exec",
-            knobs: cfg.knobs ?? {},
-            started_at: new Date(startedAt).toISOString(),
-            ended_at: new Date().toISOString(),
-            ...result,
-          },
-          null,
-          2,
-        ) + "\n",
-      );
-    } catch {
-      /* trajectory write is best-effort */
-    }
-  }
+  try {
+    stderr.write(
+      `darwin: spawning ${formatEngineCommand(engine, launchArgs)} for non-interactive goal attempt (model=${cfg.knobs?.model ?? "default"}, sandbox=${cfg.knobs?.sandbox ?? "default"})\n`,
+    );
 
-  return result;
+    await new Promise<void>((res) => {
+      const child = spawn(engineCommand(engine), launchArgs, {
+        cwd: cfg.cwd,
+        env: engineEnv(engine),
+        stdio: ["pipe", "inherit", "inherit"],
+      });
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        res();
+      };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        stderr.write(`darwin: goal attempt hit ${Math.round(cfg.maxDurationMs / 1000)}s cap — terminating exec child\n`);
+        try { child.kill("SIGTERM"); } catch { /* ignore */ }
+        setTimeout(() => {
+          try { child.kill("SIGKILL"); } catch { /* ignore */ }
+        }, cfg.gracefulMs).unref();
+      }, cfg.maxDurationMs);
+      child.stdin?.end(prompt + "\n");
+      child.on("error", (e) => {
+        spawnError = e;
+        done();
+      });
+      child.on("exit", (code) => {
+        exitCode = code;
+        done();
+      });
+    });
+
+    if (spawnError) {
+      const fallback = fallbackEngine(engine);
+      if (fallback && isEngineLaunchError(spawnError)) {
+        stderr.write(fallbackNotice(engine, fallback, spawnError));
+        cleanup();
+        return await runExecGoalAttempt(
+          cfg,
+          fallback,
+          resolveEngineArgs(fallback),
+          startedAt,
+        );
+      }
+    }
+
+    tail.drain();
+    const lastAssistantMessage = existsSync(lastMsgPath)
+      ? readFileSync(lastMsgPath, "utf-8")
+      : undefined;
+    const result: GoalAttemptResult = {
+      exitReason: spawnError ? "error" : timedOut ? "time_cap" : "engine_exit",
+      durationMs: Date.now() - startedAt,
+      lastAssistantMessage,
+      eventCounts: tail.counts,
+      exitCode,
+    };
+
+    if (cfg.trajectoryPath) {
+      try {
+        writeFileSync(
+          cfg.trajectoryPath,
+          JSON.stringify(
+            {
+              engine,
+              engine_args: selectedEngineArgs,
+              goal: cfg.goal,
+              mode: "exec",
+              knobs: cfg.knobs ?? {},
+              started_at: new Date(startedAt).toISOString(),
+              ended_at: new Date().toISOString(),
+              ...result,
+            },
+            null,
+            2,
+          ) + "\n",
+        );
+      } catch {
+        /* trajectory write is best-effort */
+      }
+    }
+
+    return result;
+  } finally {
+    cleanup();
+  }
 }
 
 export function resolveGoalAttemptMode(mode?: "exec" | "slash"): "exec" | "slash" {
@@ -399,8 +410,44 @@ export function resolveGoalAttemptMode(mode?: "exec" | "slash"): "exec" | "slash
   return raw === "slash" || raw === "tui" || raw === "/goal" ? "slash" : "exec";
 }
 
-export function buildExecGoalPrompt(goal: string): string {
-  return `You are running under darwin goal-mode. Work autonomously toward this goal, then stop when it is satisfied.\n\nGOAL:\n${goal.trim()}\n`;
+export function buildExecGoalPrompt(goal: string, maxDurationMs?: number): string {
+  const cap = maxDurationMs
+    ? ` The external Darwin time cap is about ${Math.round(maxDurationMs / 1000)} seconds.`
+    : "";
+  return `You are running under darwin goal-mode using the stable non-interactive exec runner. Work autonomously toward this goal, then stop when it is satisfied.${cap}\n\nGOAL:\n${goal.trim()}\n`;
+}
+
+function goalKnobArgs(
+  knobs: GoalAttemptOptions["knobs"],
+  selectedEngineArgs: string[],
+): string[] {
+  const args: string[] = [];
+  if (knobs?.model) args.push("-m", knobs.model);
+
+  if (hasBypassApprovalsAndSandbox(selectedEngineArgs)) {
+    if (knobs?.sandbox || knobs?.approval) {
+      stderr.write(
+        "darwin: engine args already bypass approvals/sandbox; ignoring proposed sandbox/approval knobs for this goal attempt\n",
+      );
+    }
+    return args;
+  }
+
+  if (knobs?.sandbox) {
+    if (hasSandboxArg(selectedEngineArgs)) {
+      stderr.write("darwin: engine args already set sandbox; ignoring proposed sandbox knob\n");
+    } else {
+      args.push("-s", knobs.sandbox);
+    }
+  }
+  if (knobs?.approval) {
+    if (hasApprovalArg(selectedEngineArgs)) {
+      stderr.write("darwin: engine args already set approval policy; ignoring proposed approval knob\n");
+    } else {
+      args.push("-a", knobs.approval);
+    }
+  }
+  return args;
 }
 
 function sleep(ms: number): Promise<void> {

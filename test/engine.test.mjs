@@ -8,7 +8,7 @@ import {
 
 test("omx exec args translate launch shorthands and avoid launch-only flags", () => {
   assert.deepEqual(
-    engineExecArgs("omx", ["--madmax", "--xhigh", "--direct"], ["--skip-git-repo-check"]),
+    engineExecArgs("omx", ["--madmax", "--xhigh", "--direct", "--launch-policy", "tmux", "--launch-policy=direct"], ["--skip-git-repo-check"]),
     [
       "exec",
       "--dangerously-bypass-approvals-and-sandbox",
