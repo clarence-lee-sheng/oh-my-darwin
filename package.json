@@ -1,0 +1,25 @@
+{
+  "name": "oh-my-darwin",
+  "version": "0.0.1",
+  "description": "Meta-harness on-ramp: turn a task into an iterative loop. Wraps Codex CLI.",
+  "type": "module",
+  "bin": {
+    "darwin": "dist/cli/index.js",
+    "darwin-hook": "dist/cli/hook.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}

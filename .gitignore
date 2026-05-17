@@ -1,0 +1,9 @@
+# darwin / Codex local state
+.darwin/
+.codex/
+
+# Node
+node_modules/
+dist/
+*.log
+.DS_Store

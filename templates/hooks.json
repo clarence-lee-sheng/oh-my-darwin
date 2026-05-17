@@ -1,0 +1,5 @@
+{
+  "pre_tool_use":  "darwin-hook pre_tool_use",
+  "post_tool_use": "darwin-hook post_tool_use",
+  "on_stop":       "darwin-hook on_stop"
+}
