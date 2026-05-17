@@ -6,7 +6,7 @@ import {
   resolveGoalAttemptMode,
 } from "../dist/runtime/goal-attempt.js";
 import { engineExecArgs, engineInteractiveArgs } from "../dist/runtime/engine.js";
-import { shouldPromptForGoalApproval } from "../dist/cli/meta.js";
+import { parseLoopOptions, shouldPromptForGoalApproval } from "../dist/cli/meta.js";
 
 test("goal attempt defaults to non-interactive exec mode", () => {
   const prev = process.env.DARWIN_GOAL_ATTEMPT_MODE;
@@ -26,6 +26,20 @@ test("goal attempt preserves slash mode as explicit legacy override", () => {
     assert.equal(resolveGoalAttemptMode(), "slash");
     assert.equal(resolveGoalAttemptMode("exec"), "exec");
     assert.equal(resolveGoalAttemptMode("slash"), "slash");
+  } finally {
+    if (prev === undefined) delete process.env.DARWIN_GOAL_ATTEMPT_MODE;
+    else process.env.DARWIN_GOAL_ATTEMPT_MODE = prev;
+  }
+});
+
+test("meta goal runner option preserves env fallback unless flag is explicit", () => {
+  const prev = process.env.DARWIN_GOAL_ATTEMPT_MODE;
+  process.env.DARWIN_GOAL_ATTEMPT_MODE = "slash";
+  try {
+    assert.equal(parseLoopOptions(["--goal-mode"]).goalRunner, undefined);
+    assert.equal(resolveGoalAttemptMode(parseLoopOptions(["--goal-mode"]).goalRunner), "slash");
+    assert.equal(parseLoopOptions(["--goal-mode", "--goal-runner", "exec"]).goalRunner, "exec");
+    assert.equal(resolveGoalAttemptMode(parseLoopOptions(["--goal-mode", "--goal-runner", "exec"]).goalRunner), "exec");
   } finally {
     if (prev === undefined) delete process.env.DARWIN_GOAL_ATTEMPT_MODE;
     else process.env.DARWIN_GOAL_ATTEMPT_MODE = prev;

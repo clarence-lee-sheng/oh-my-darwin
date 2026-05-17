@@ -8,7 +8,10 @@ import {
   engineCommand,
   engineEnv,
   engineExecArgs,
+  fallbackEngine,
+  fallbackNotice,
   formatEngineCommand,
+  isEngineLaunchError,
   resolveEngineArgs,
   type EngineName,
 } from "../runtime/engine.js";
@@ -117,12 +120,35 @@ export async function invokeGoalProposer(
   cwd: string,
   options: GoalProposerOptions = {},
 ): Promise<GoalCandidate> {
+  const engine = options.engine ?? DEFAULT_ENGINE;
+  const selectedEngineArgs = options.engineArgs ?? resolveEngineArgs(engine);
+  try {
+    return await invokeGoalProposerWithEngine(prompt, cwd, engine, selectedEngineArgs);
+  } catch (err) {
+    const fallback = fallbackEngine(engine);
+    if (fallback && isEngineLaunchError(err)) {
+      stderr.write(fallbackNotice(engine, fallback, err));
+      return await invokeGoalProposerWithEngine(
+        prompt,
+        cwd,
+        fallback,
+        resolveEngineArgs(fallback),
+      );
+    }
+    throw err;
+  }
+}
+
+async function invokeGoalProposerWithEngine(
+  prompt: string,
+  cwd: string,
+  engine: EngineName,
+  selectedEngineArgs: string[],
+): Promise<GoalCandidate> {
   const tmp = mkdtempSync(join(tmpdir(), "darwin-proposer-"));
   const lastMsgPath = join(tmp, "last.txt");
   const timeoutMs = parsePositiveInt(process.env.DARWIN_GOAL_PROPOSER_TIMEOUT_MS)
     ?? DEFAULT_PROPOSER_TIMEOUT_MS;
-  const engine = options.engine ?? DEFAULT_ENGINE;
-  const selectedEngineArgs = options.engineArgs ?? resolveEngineArgs(engine);
 
   try {
     const args = engineExecArgs(engine, selectedEngineArgs, [
@@ -139,12 +165,20 @@ export async function invokeGoalProposer(
     stderr.write(`darwin: invoking ${formatEngineCommand(engine, args)} for goal proposer...\n`);
     const code = await new Promise<number>((res, rej) => {
       let timedOut = false;
+      let settled = false;
+      let timer: NodeJS.Timeout;
       const child = spawn(engineCommand(engine), args, {
         cwd,
         env: engineEnv(engine),
         stdio: ["pipe", "inherit", "inherit"],
       });
-      const timer = setTimeout(() => {
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        fn();
+      };
+      timer = setTimeout(() => {
         timedOut = true;
         stderr.write(`darwin: goal proposer timed out after ${Math.round(timeoutMs / 1000)}s — terminating codex exec\n`);
         try { child.kill("SIGTERM"); } catch { /* ignore */ }
@@ -153,11 +187,12 @@ export async function invokeGoalProposer(
         }, 2_000).unref();
       }, timeoutMs);
       child.stdin?.end(prompt + "\n");
-      child.on("error", rej);
+      child.on("error", (e) => settle(() => rej(e)));
       child.on("exit", (c) => {
-        clearTimeout(timer);
-        if (timedOut) res(124);
-        else res(c ?? 1);
+        settle(() => {
+          if (timedOut) res(124);
+          else res(c ?? 1);
+        });
       });
     });
     if (code !== 0) {

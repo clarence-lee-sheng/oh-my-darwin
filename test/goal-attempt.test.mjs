@@ -99,3 +99,35 @@ exit 0
     process.env.PATH = oldPath;
   }
 });
+
+test("runGoalAttempt exec mode reports nonzero engine exit as error", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "darwin-goal-nonzero-"));
+  mkdirSync(join(cwd, ".darwin"), { recursive: true });
+  writeFileSync(join(cwd, ".darwin", "events.jsonl"), "", "utf8");
+  const bin = join(cwd, "bin");
+  mkdirSync(bin);
+  const fakeCodex = join(bin, "codex");
+  writeFileSync(fakeCodex, `#!/bin/sh
+cat >/dev/null
+exit 7
+`, "utf8");
+  chmodSync(fakeCodex, 0o755);
+
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:/usr/bin:/bin`;
+  try {
+    const result = await runGoalAttempt({
+      cwd,
+      engine: "codex",
+      engineArgs: ["--dangerously-bypass-approvals-and-sandbox"],
+      goal: "fail intentionally",
+      maxDurationMs: 3000,
+      gracefulMs: 100,
+      runner: "exec",
+    });
+    assert.equal(result.exitReason, "error");
+    assert.equal(result.exitCode, 7);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});

@@ -364,7 +364,7 @@ async function runExecGoalAttempt(
       ? readFileSync(lastMsgPath, "utf-8")
       : undefined;
     const result: GoalAttemptResult = {
-      exitReason: spawnError ? "error" : timedOut ? "time_cap" : "engine_exit",
+      exitReason: timedOut ? "time_cap" : spawnError || exitCode !== 0 ? "error" : "engine_exit",
       durationMs: Date.now() - startedAt,
       lastAssistantMessage,
       eventCounts: tail.counts,

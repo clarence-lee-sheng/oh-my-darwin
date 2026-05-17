@@ -119,13 +119,16 @@ interface LoopOptions {
   attemptMaxMs: number;
   /** Quiet period in ms before goal is considered done (goal-mode only). */
   attemptQuietMs: number;
-  /** Goal-mode execution primitive. */
-  goalRunner: GoalRunner;
+  /**
+   * Goal-mode execution primitive. Undefined means use runGoalAttempt's
+   * normal default/env resolution.
+   */
+  goalRunner?: GoalRunner;
 }
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 
-function parseLoopOptions(args: string[]): LoopOptions {
+export function parseLoopOptions(args: string[]): LoopOptions {
   let maxIterations = Infinity;
   const iterIdx = args.indexOf("--iterations");
   if (iterIdx !== -1) {
@@ -160,7 +163,7 @@ function parseLoopOptions(args: string[]): LoopOptions {
     else throw new Error(`invalid --attempt-quiet value: ${args[quietIdx + 1] ?? ""} (use forms like 30s, 2m)`);
   }
 
-  let goalRunner: GoalRunner = "exec";
+  let goalRunner: GoalRunner | undefined;
   const runnerIdx = args.indexOf("--goal-runner");
   if (runnerIdx !== -1) {
     const raw = args[runnerIdx + 1] ?? "";
