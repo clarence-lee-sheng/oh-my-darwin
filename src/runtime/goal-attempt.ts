@@ -173,7 +173,6 @@ export async function runGoalAttempt(
   }
 
   // Main loop: poll tail + check stop conditions.
-  let lastActivityAt = Date.now();
   let sawStopAt: number | null = null;
   let lastAssistantMessage: string | undefined;
   let exitReason: GoalExitReason | null = null;
@@ -195,11 +194,9 @@ export async function runGoalAttempt(
     for (const ev of newEvents) {
       // Track activity so quiet timer resets on tool calls / new prompts.
       if (ev.event === "pre_tool_use" || ev.event === "user_prompt_submit") {
-        lastActivityAt = Date.now();
         sawStopAt = null; // continuing
       } else if (ev.event === "stop") {
         sawStopAt = Date.now();
-        lastActivityAt = Date.now();
         if (typeof ev.last_assistant_message === "string") {
           lastAssistantMessage = ev.last_assistant_message;
         }
@@ -219,7 +216,6 @@ export async function runGoalAttempt(
   }
 
   tail.close();
-  const _ = lastActivityAt; // referenced for future telemetry; quiet detection uses sawStopAt
 
   // Graceful shutdown if codex still running.
   if (!codexExited) {
@@ -323,13 +319,14 @@ async function runExecGoalAttempt(
         stdio: ["pipe", "inherit", "inherit"],
       });
       let settled = false;
+      let timer: NodeJS.Timeout;
       const done = () => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         res();
       };
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         timedOut = true;
         stderr.write(`darwin: goal attempt hit ${Math.round(cfg.maxDurationMs / 1000)}s cap — terminating exec child\n`);
         try { child.kill("SIGTERM"); } catch { /* ignore */ }
