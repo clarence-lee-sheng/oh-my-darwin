@@ -9,7 +9,7 @@ export type LifecycleEvent =
   | "pre_tool_use"
   | "post_tool_use"
   | "on_stop"
-  | (string & {}); // open set; Codex may add more
+  | (string & {}); // open set; Codex/OMX may add more
 
 export type HookPayload = Record<string, unknown>;
 

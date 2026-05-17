@@ -2,7 +2,13 @@ import readline from "node:readline/promises";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { stdin, stdout, stderr } from "node:process";
-import { spawnCodex } from "../runtime/bridge.js";
+import { spawnEngine } from "../runtime/bridge.js";
+import {
+  engineCommand,
+  engineLabel,
+  formatEngineCommand,
+  type EngineName,
+} from "../runtime/engine.js";
 import { readSpec } from "../spec/parse.js";
 import { writeFrontier } from "../state/frontier.js";
 import { appendEvolution } from "../state/history.js";
@@ -14,12 +20,15 @@ import {
 
 /**
  * Run the task described in .darwin/meta-spec.md once, no proposer
- * in play, to establish a starting score. Spawns Codex interactively
- * with the task as the initial prompt; on Codex exit, prompts the
+ * in play, to establish a starting score. Spawns the selected agent
+ * with the task as the initial prompt; on agent exit, prompts the
  * user for a realized score; writes frontier.json + one evolution
  * row + a runs/baseline/ directory with the task prompt for the record.
  */
-export async function baseline(): Promise<void> {
+export async function baseline(
+  engine: EngineName = "codex",
+  engineArgs: string[] = [],
+): Promise<void> {
   const cwd = process.cwd();
   const spec = readSpec(cwd);
   if (!spec.task) {
@@ -35,15 +44,17 @@ export async function baseline(): Promise<void> {
 
   stderr.write(`darwin: baseline run for "${spec.slug || "(unnamed)"}"\n`);
   stderr.write(`darwin: task →\n  ${spec.task.split("\n").join("\n  ")}\n\n`);
-  stderr.write("darwin: launching codex (interactive)\n");
+  stderr.write(
+    `darwin: launching ${formatEngineCommand(engine, engineArgs)} (${engineLabel(engine)}, interactive)\n`,
+  );
 
   const startedAt = Date.now();
-  const { exit } = spawnCodex([spec.task]);
+  const { exit } = spawnEngine(engine, [spec.task], { engineArgs });
   const exitCode = await exit;
   const endedAt = Date.now();
 
   stderr.write(
-    `\ndarwin: codex exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
+    `\ndarwin: ${engineCommand(engine)} exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
   );
 
   // Capture realized score + optional note.

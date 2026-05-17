@@ -9,7 +9,13 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { stdin, stdout, stderr } from "node:process";
 import { fileURLToPath } from "node:url";
-import { spawnCodex } from "../runtime/bridge.js";
+import { spawnEngine } from "../runtime/bridge.js";
+import {
+  engineCommand,
+  engineLabel,
+  formatEngineCommand,
+  type EngineName,
+} from "../runtime/engine.js";
 import { readSpec } from "../spec/parse.js";
 import { readFrontier, writeFrontier } from "../state/frontier.js";
 import {
@@ -64,6 +70,7 @@ function parseIterations(args: string[]): number {
 }
 
 interface ProposerPromptArgs {
+  engine: EngineName;
   task: string;
   currentHarness: string;
   frontierAttempt: string;
@@ -82,8 +89,8 @@ function buildProposerPrompt(a: ProposerPromptArgs): string {
 that you believe will improve the score on this task.
 
 The harness is an ESM JavaScript module (.mjs) that controls how the task
-is presented to Codex when the executor runs. The current harness is shown
-below.
+is presented to ${engineLabel(a.engine)} when the executor runs. The current
+harness is shown below.
 
 TASK:
 ${a.task}
@@ -117,7 +124,11 @@ Write a one-sentence hypothesis at the top of the file as a // comment.
 Exit when the file is written.`;
 }
 
-export async function meta(args: string[]): Promise<void> {
+export async function meta(
+  args: string[],
+  engine: EngineName = "codex",
+  engineArgs: string[] = [],
+): Promise<void> {
   const iterations = parseIterations(args);
   const cwd = process.cwd();
 
@@ -132,7 +143,7 @@ export async function meta(args: string[]): Promise<void> {
       stderr.write("darwin: aborting. Run `darwin init` when ready.\n");
       return;
     }
-    await init();
+    await init(engine, engineArgs);
     if (!existsSync(specPath)) {
       throw new Error("init did not produce meta-spec.md; aborting");
     }
@@ -149,7 +160,7 @@ export async function meta(args: string[]): Promise<void> {
   let front = readFrontier(cwd);
   if (!front) {
     stderr.write("darwin: no frontier found, running baseline first\n");
-    await baseline();
+    await baseline(engine, engineArgs);
     front = readFrontier(cwd);
     if (!front) {
       throw new Error("baseline did not produce a frontier; aborting");
@@ -167,7 +178,7 @@ export async function meta(args: string[]): Promise<void> {
 
   for (let i = 1; i <= iterations; i++) {
     stderr.write(`\n=== iteration ${i}/${iterations} ===\n`);
-    await runIteration(i, cwd, spec.task);
+    await runIteration(i, cwd, spec.task, engine, engineArgs);
   }
 }
 
@@ -175,6 +186,8 @@ async function runIteration(
   i: number,
   cwd: string,
   task: string,
+  engine: EngineName,
+  engineArgs: string[],
 ): Promise<void> {
   const attemptId = `iter-${i}`;
   const proposalDir = join(cwd, DARWIN_DIR, PROPOSALS_DIR, attemptId);
@@ -188,6 +201,7 @@ async function runIteration(
   const priorHint = readLastEvolutionHint(cwd);
 
   const proposerPrompt = buildProposerPrompt({
+    engine,
     task,
     currentHarness,
     frontierAttempt: front.attempt_id,
@@ -198,9 +212,9 @@ async function runIteration(
   });
 
   // 1. Propose
-  stderr.write("darwin: invoking proposer (codex)...\n");
+  stderr.write(`darwin: invoking proposer (${formatEngineCommand(engine, engineArgs)})...\n`);
   try {
-    await invokeProposer(proposerPrompt, proposalHarness);
+    await invokeProposer(proposerPrompt, proposalHarness, engine, engineArgs);
   } catch (e) {
     stderr.write(`darwin: proposer failed: ${e}\n`);
     appendEvolution(
@@ -247,13 +261,15 @@ async function runIteration(
   writeFileSync(join(runDir, "prompt.txt"), prompt);
   writeFileSync(join(runDir, "task.md"), task + "\n");
 
-  stderr.write("darwin: launching codex (interactive) with candidate harness\n");
+  stderr.write(
+    `darwin: launching ${formatEngineCommand(engine, engineArgs)} (${engineLabel(engine)}, interactive) with candidate harness\n`,
+  );
   const startedAt = Date.now();
-  const { exit } = spawnCodex([prompt]);
+  const { exit } = spawnEngine(engine, [prompt], { engineArgs });
   const exitCode = await exit;
   const endedAt = Date.now();
   stderr.write(
-    `darwin: codex exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
+    `darwin: ${engineCommand(engine)} exited (code ${exitCode}, ${Math.round((endedAt - startedAt) / 1000)}s)\n`,
   );
 
   // 4. Score

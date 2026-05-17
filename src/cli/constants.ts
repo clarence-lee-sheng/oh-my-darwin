@@ -1,3 +1,5 @@
+// Codex and OMX both consume Codex's native hook surface. OMX is launched as a
+// wrapper CLI, but its lifecycle hooks are still registered through .codex.
 export const HOOKS_DIR = ".codex";
 export const HOOKS_FILE = "hooks.json";
 export const DARWIN_DIR = ".darwin";

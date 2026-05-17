@@ -14,6 +14,7 @@ const SKIP_DIRS = new Set([
   "target",
   ".darwin",
   ".codex",
+  ".omx",
 ]);
 
 const README_CANDIDATES = ["README.md", "README", "Readme.md", "readme.md"];

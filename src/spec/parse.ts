@@ -13,7 +13,7 @@ export interface SpecSlice {
 
 /**
  * Minimal spec reader for v1: just enough for `darwin baseline` to
- * launch Codex with the task as the initial prompt. Full structured
+ * launch the selected agent with the task as the initial prompt. Full structured
  * parsing (scorer type, constraints, etc.) is deferred until `meta`
  * actually needs it.
  */

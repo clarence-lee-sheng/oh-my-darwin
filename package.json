@@ -1,7 +1,7 @@
 {
   "name": "oh-my-darwin",
   "version": "0.0.1",
-  "description": "Meta-harness on-ramp: turn a task into an iterative loop. Wraps Codex CLI.",
+  "description": "Meta-harness on-ramp: turn a task into an iterative loop. Wraps Codex CLI or OMX.",
   "type": "module",
   "bin": {
     "darwin": "dist/cli/index.js",
