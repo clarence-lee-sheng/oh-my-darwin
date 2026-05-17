@@ -828,11 +828,14 @@ async function runGoalIteration(
     return "rejected";
   }
 
-  // 2b. HITL approval (BEFORE-execution). Always on in goal-mode for now.
-  const approved = await promptYesNo(
-    "\nrun this goal? [Y/n/skip] ",
-    true,
-  );
+  // 2b. Optional HITL approval (BEFORE execution). In bounded/non-interactive
+  // runs, auto-approve so goal-mode can be scripted by demos and CI.
+  const approved = opts.interactive
+    ? await promptYesNo(
+        "\nrun this goal? [Y/n/skip] ",
+        true,
+      )
+    : true;
   if (!approved) {
     appendEvolution(
       {
@@ -850,8 +853,9 @@ async function runGoalIteration(
     return "rejected";
   }
 
-  // 3. Execute via /goal
-  stderr.write(`darwin: launching ${engineLabel(engine)} with /goal\n`);
+  // 3. Execute the goal. Default transport is non-interactive exec; set
+  // DARWIN_GOAL_ATTEMPT_MODE=slash to preserve legacy /goal TUI automation.
+  stderr.write(`darwin: launching ${engineLabel(engine)} goal attempt\n`);
   const result = await runGoalAttempt({
     goal: candidate.goal,
     cwd,
