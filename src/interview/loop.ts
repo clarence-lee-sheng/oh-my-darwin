@@ -197,7 +197,7 @@ function writeInterviewOutput(message: string): void {
 }
 
 export function formatInterviewQuestionForTerminal(value: unknown): string {
-  return formatErrorSummary(value);
+  return String(value).trim();
 }
 
 export function formatSafetyNoteForTerminal(value: unknown): string {

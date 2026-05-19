@@ -81,17 +81,20 @@ test("darwin init /done finalizes without scanning or invoking an engine", async
   assert.doesNotMatch(stderr, /thinking \(turn 1\)/);
 });
 
-test("interview stdout fields are single-line and bounded", () => {
+test("interview questions preserve multiline text and are not truncated", () => {
   const question = formatInterviewQuestionForTerminal(`What now?\n${"q".repeat(1000)}`);
+
+  assert.match(question, /^What now\?\nq+$/);
+  assert.doesNotMatch(question, /\.\.\.$/);
+  assert.ok(question.length > 900);
+});
+
+test("interview safety notes are single-line and bounded", () => {
   const note = formatSafetyNoteForTerminal(`Review this\n${"s".repeat(1000)}`);
 
-  assert.match(question, /What now\? q+/);
   assert.match(note, /Review this s+/);
-  assert.doesNotMatch(question, /What now\?\nq/);
   assert.doesNotMatch(note, /Review this\ns/);
-  assert.doesNotMatch(question, /q{180}/);
   assert.doesNotMatch(note, /s{180}/);
-  assert.ok(question.length <= 160);
   assert.ok(note.length <= 160);
 });
 
