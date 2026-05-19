@@ -1,8 +1,0 @@
-{
-  "name": "darwin-penguins-insights-demo",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "test": "node score.mjs"
-  }
-}
