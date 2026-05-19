@@ -9,11 +9,14 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  mkdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { stderr } from "node:process";
+import { fileURLToPath } from "node:url";
 import { DARWIN_DIR, EVENTS_LOG } from "../cli/constants.js";
+import { formatDurationMs } from "./diagnostics.js";
 import {
   DEFAULT_ENGINE,
   engineCommand,
@@ -22,7 +25,7 @@ import {
   engineInteractiveArgs,
   fallbackEngine,
   fallbackNotice,
-  formatEngineCommand,
+  formatEngineCommandForLog,
   hasApprovalArg,
   hasBypassApprovalsAndSandbox,
   hasSandboxArg,
@@ -30,8 +33,17 @@ import {
   resolveEngineArgs,
   type EngineName,
 } from "./engine.js";
+import { terminateProcessTree } from "./process-tree.js";
+import {
+  formatQuietChildStderrTail,
+  runQuietChild,
+  type QuietChildResult,
+} from "./quiet-child.js";
+import { writeTerminalStream } from "./terminal.js";
 
-export type GoalRunner = "exec" | "slash";
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+export type GoalRunner = "initial" | "exec" | "slash";
 
 export type GoalExitReason =
   | "quiet"          // no new tool/prompt activity within quietMs after last `stop`
@@ -61,8 +73,10 @@ export interface GoalAttemptOptions {
   /** Engine/launch args selected by Darwin's CLI config. */
   engineArgs?: string[];
   /**
-   * Execution primitive. `exec` is the stable default for automation; `slash`
-   * keeps the original interactive `/goal` injection path for manual debugging.
+   * Execution primitive. `initial` starts the interactive engine with a short
+   * `/goal ...` initial prompt, `exec` uses non-interactive automation without
+   * slash-command goal state, and `slash` keeps the legacy post-start TUI
+   * injection path for manual debugging.
    */
   runner?: GoalRunner;
   /** Per-attempt knobs forwarded to codex CLI flags. */
@@ -83,20 +97,19 @@ export interface GoalAttemptOptions {
   gracefulMs?: number;
   /** Delay after spawn before injecting /goal, to let TUI initialize. Default: 1500ms. */
   tuiWarmupMs?: number;
-  /** Attempt transport. Default: non-interactive exec; set slash for legacy /goal TUI automation. */
-  mode?: "exec" | "slash";
+  /** Attempt transport. Default: initial `/goal` prompt; `exec` is non-slash automation. */
+  mode?: GoalRunner;
   /** Optional path to write a per-attempt trajectory summary. */
   trajectoryPath?: string;
 }
 
 const DEFAULTS = {
-  runner: "exec" as GoalRunner,
+  runner: "initial" as GoalRunner,
   maxDurationMs: 30 * 60 * 1000,
   quietMs: 60_000,
   gracefulMs: 5_000,
   tuiWarmupMs: 1_500,
 };
-
 /**
  * Run one slash-goal attempt. Spawns the selected engine interactively (TUI
  * visible to the user), injects `/goal <text>` once the TUI is ready, then watches
@@ -117,9 +130,15 @@ export async function runGoalAttempt(
   if (mode === "exec") {
     return runExecGoalAttempt(cfg, engine, selectedEngineArgs, startedAt);
   }
+  if (mode === "initial") {
+    return runInitialGoalAttempt(cfg, engine, selectedEngineArgs, startedAt);
+  }
 
   // Build engine argv. No PROMPT arg — we inject /goal via stdin after warmup.
-  const goalArgs = goalKnobArgs(opts.knobs, selectedEngineArgs);
+  const goalArgs = withInteractiveGoalRuntimeArgs(
+    [...selectedEngineArgs],
+    goalKnobArgs(opts.knobs, selectedEngineArgs),
+  );
   // Preserve scrollback and make scripted `/goal` injection easier to debug.
   goalArgs.push("--no-alt-screen");
   const launchArgs = engineInteractiveArgs(engine, selectedEngineArgs, goalArgs);
@@ -127,19 +146,30 @@ export async function runGoalAttempt(
   const eventsPath = resolve(opts.cwd, DARWIN_DIR, EVENTS_LOG);
   const tail = startTail(eventsPath);
 
-  stderr.write(
-    `darwin: spawning ${formatEngineCommand(engine, launchArgs)} for /goal attempt (model=${opts.knobs?.model ?? "default"}, sandbox=${opts.knobs?.sandbox ?? "default"})\n`,
+  writeGoalAttemptStatus(
+    `darwin: spawning ${formatEngineCommandForLog(engine, launchArgs)} for /goal attempt (model=${opts.knobs?.model ?? "default"}, sandbox=${opts.knobs?.sandbox ?? "default"})\n`,
   );
 
   const launch = ptyLaunchCommand(engineCommand(engine), launchArgs);
   if (launch.ptyWrapped) {
-    stderr.write(`darwin: wrapping ${engineCommand(engine)} in a pseudo-terminal for /goal automation (${launch.command})\n`);
+    writeGoalAttemptStatus(
+      `darwin: wrapping ${engineCommand(engine)} in a pseudo-terminal for /goal automation (${launch.command})\n`,
+    );
   }
+  const showInteractiveOutput = process.stdout.isTTY && process.stderr.isTTY;
   const child = spawn(launch.command, launch.args, {
     cwd: opts.cwd,
     env: engineEnv(engine),
-    stdio: ["pipe", "inherit", "inherit"],
+    stdio: [
+      "pipe",
+      showInteractiveOutput ? "inherit" : "pipe",
+      showInteractiveOutput ? "inherit" : "pipe",
+    ],
   });
+  if (!showInteractiveOutput) {
+    child.stdout?.resume();
+    child.stderr?.resume();
+  }
 
   let exitCode: number | null = null;
   let codexExited = false;
@@ -219,7 +249,7 @@ export async function runGoalAttempt(
 
   // Graceful shutdown if codex still running.
   if (!codexExited) {
-    stderr.write(`darwin: goal attempt ${exitReason} — sending /quit to codex\n`);
+    writeGoalAttemptStatus(`darwin: goal attempt ${exitReason} - sending /quit to codex\n`);
     if (child.stdin && !child.stdin.destroyed) {
       try { child.stdin.write(`/quit\n`); } catch { /* ignore */ }
     }
@@ -229,12 +259,12 @@ export async function runGoalAttempt(
     ]);
     const winner = await graceful;
     if (winner === "timeout") {
-      stderr.write("darwin: codex did not exit after /quit — SIGTERM\n");
-      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+      writeGoalAttemptStatus("darwin: codex did not exit after /quit - SIGTERM\n");
+      terminateProcessTree(child.pid, "SIGTERM", child.kill.bind(child));
       await Promise.race([exitPromise, sleep(2_000)]);
       if (!codexExited) {
-        try { child.kill("SIGKILL"); } catch { /* ignore */ }
-        await exitPromise;
+        terminateProcessTree(child.pid, "SIGKILL", child.kill.bind(child));
+        await Promise.race([exitPromise, sleep(2_000)]);
       }
     }
   }
@@ -274,6 +304,166 @@ export async function runGoalAttempt(
 }
 
 
+async function runInitialGoalAttempt(
+  cfg: Required<Pick<GoalAttemptOptions, "goal" | "cwd">> & GoalAttemptOptions & typeof DEFAULTS,
+  engine: EngineName,
+  selectedEngineArgs: string[],
+  startedAt: number,
+): Promise<GoalAttemptResult> {
+  const goalPath = writeInitialGoalFile(cfg);
+  const initialPrompt = buildInitialGoalPrompt(
+    formatGoalPathForPrompt(cfg.cwd, goalPath),
+    cfg.maxDurationMs,
+  );
+  const goalArgs = withInteractiveGoalRuntimeArgs(
+    [...selectedEngineArgs],
+    goalKnobArgs(cfg.knobs, selectedEngineArgs),
+  );
+  // Preserve scrollback while still running the real interactive CLI.
+  goalArgs.push("--no-alt-screen");
+  const launchArgs = engineInteractiveArgs(engine, selectedEngineArgs, goalArgs);
+  const argv = [...launchArgs, initialPrompt];
+
+  const eventsPath = resolve(cfg.cwd, DARWIN_DIR, EVENTS_LOG);
+  const tail = startTail(eventsPath);
+
+  writeGoalAttemptStatus(
+    `darwin: spawning ${formatEngineCommandForLog(engine, argv)} for initial /goal attempt (model=${cfg.knobs?.model ?? "default"}, sandbox=${cfg.knobs?.sandbox ?? "default"})\n`,
+  );
+
+  const child = spawn(engineCommand(engine), argv, {
+    cwd: cfg.cwd,
+    env: engineEnv(engine),
+    stdio: "inherit",
+  });
+
+  let exitCode: number | null = null;
+  let engineExited = false;
+  let spawnError: Error | null = null;
+  const exitPromise = new Promise<void>((res) => {
+    child.once("error", (e) => {
+      spawnError = e;
+      engineExited = true;
+      res();
+    });
+    child.once("exit", (code) => {
+      exitCode = code;
+      engineExited = true;
+      res();
+    });
+  });
+
+  // Give immediate launch failures a chance to surface so OMX can fall back to
+  // Codex before the tail/quiet loop starts.
+  await Promise.race([exitPromise, sleep(50)]);
+  if (spawnError) {
+    const fallback = fallbackEngine(engine);
+    if (fallback && isEngineLaunchError(spawnError)) {
+      tail.close();
+      writeGoalAttemptStatus(fallbackNotice(engine, fallback, spawnError));
+      return await runInitialGoalAttempt(
+        cfg,
+        fallback,
+        resolveEngineArgs(fallback),
+        startedAt,
+      );
+    }
+  }
+
+  let sawStopAt: number | null = null;
+  let lastAssistantMessage: string | undefined;
+  let exitReason: GoalExitReason | null = null;
+
+  const POLL_MS = 250;
+  while (true) {
+    if (engineExited) {
+      exitReason = spawnError || exitCode !== 0 ? "error" : "engine_exit";
+      break;
+    }
+
+    const elapsed = Date.now() - startedAt;
+    if (elapsed >= cfg.maxDurationMs) {
+      exitReason = "time_cap";
+      break;
+    }
+
+    const newEvents = tail.drain();
+    for (const ev of newEvents) {
+      if (ev.event === "pre_tool_use" || ev.event === "user_prompt_submit") {
+        sawStopAt = null;
+      } else if (ev.event === "stop") {
+        sawStopAt = Date.now();
+        if (typeof ev.last_assistant_message === "string") {
+          lastAssistantMessage = ev.last_assistant_message;
+        }
+      }
+    }
+
+    if (sawStopAt !== null && Date.now() - sawStopAt >= cfg.quietMs) {
+      exitReason = "quiet";
+      break;
+    }
+
+    await sleep(POLL_MS);
+  }
+
+  tail.close();
+
+  if (!engineExited) {
+    writeGoalAttemptStatus(
+      `darwin: goal attempt ${exitReason} - terminating ${engineCommand(engine)}\n`,
+    );
+    terminateProcessTree(child.pid, "SIGTERM", child.kill.bind(child));
+    const winner = await Promise.race([
+      exitPromise,
+      sleep(cfg.gracefulMs).then(() => "timeout" as const),
+    ]);
+    if (winner === "timeout") {
+      writeGoalAttemptStatus(
+        `darwin: ${engineCommand(engine)} did not exit after SIGTERM - SIGKILL\n`,
+      );
+      terminateProcessTree(child.pid, "SIGKILL", child.kill.bind(child));
+      await Promise.race([exitPromise, sleep(2_000)]);
+    }
+  }
+
+  const result: GoalAttemptResult = {
+    exitReason: exitReason!,
+    durationMs: Date.now() - startedAt,
+    lastAssistantMessage,
+    eventCounts: tail.counts,
+    exitCode,
+  };
+
+  if (cfg.trajectoryPath) {
+    try {
+      writeFileSync(
+        cfg.trajectoryPath,
+        JSON.stringify(
+          {
+            engine,
+            engine_args: selectedEngineArgs,
+            goal: cfg.goal,
+            mode: "initial",
+            goal_path: goalPath,
+            initial_prompt: initialPrompt,
+            knobs: cfg.knobs ?? {},
+            started_at: new Date(startedAt).toISOString(),
+            ended_at: new Date().toISOString(),
+            ...result,
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+    } catch {
+      /* trajectory write is best-effort */
+    }
+  }
+
+  return result;
+}
+
 async function runExecGoalAttempt(
   cfg: Required<Pick<GoalAttemptOptions, "goal" | "cwd">> & GoalAttemptOptions & typeof DEFAULTS,
   engine: EngineName,
@@ -285,6 +475,12 @@ async function runExecGoalAttempt(
   const launchArgs = engineExecArgs(engine, selectedEngineArgs, [
     ...goalKnobArgs(cfg.knobs, selectedEngineArgs),
     "--skip-git-repo-check",
+    // Exec-mode goal attempts do not rely on hook events for completion:
+    // they wait for the child process and read --output-last-message. Leaving
+    // project hooks enabled can make Codex block during Stop-hook teardown, so
+    // keep the stable runner isolated just like the goal proposer.
+    "--disable",
+    "hooks",
     "--output-last-message",
     lastMsgPath,
     "--color",
@@ -308,47 +504,33 @@ async function runExecGoalAttempt(
   };
 
   try {
-    stderr.write(
-      `darwin: spawning ${formatEngineCommand(engine, launchArgs)} for non-interactive goal attempt (model=${cfg.knobs?.model ?? "default"}, sandbox=${cfg.knobs?.sandbox ?? "default"})\n`,
+    writeGoalAttemptStatus(
+      `darwin: spawning ${formatEngineCommandForLog(engine, launchArgs)} for non-interactive goal attempt (model=${cfg.knobs?.model ?? "default"}, sandbox=${cfg.knobs?.sandbox ?? "default"})\n`,
     );
 
-    await new Promise<void>((res) => {
-      const child = spawn(engineCommand(engine), launchArgs, {
+    let childResult: QuietChildResult | undefined;
+    try {
+      childResult = await runQuietChild({
+        command: engineCommand(engine),
+        args: launchArgs,
         cwd: cfg.cwd,
         env: engineEnv(engine),
-        stdio: ["pipe", "inherit", "inherit"],
+        input: prompt + "\n",
+        timeoutMs: cfg.maxDurationMs,
+        timeoutLabel: "goal attempt",
+        killGraceMs: cfg.gracefulMs,
+        writeStatus: writeGoalAttemptStatus,
       });
-      let settled = false;
-      let timer: NodeJS.Timeout;
-      const done = () => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        res();
-      };
-      timer = setTimeout(() => {
-        timedOut = true;
-        stderr.write(`darwin: goal attempt hit ${Math.round(cfg.maxDurationMs / 1000)}s cap — terminating exec child\n`);
-        try { child.kill("SIGTERM"); } catch { /* ignore */ }
-        setTimeout(() => {
-          try { child.kill("SIGKILL"); } catch { /* ignore */ }
-        }, cfg.gracefulMs).unref();
-      }, cfg.maxDurationMs);
-      child.stdin?.end(prompt + "\n");
-      child.on("error", (e) => {
-        spawnError = e;
-        done();
-      });
-      child.on("exit", (code) => {
-        exitCode = code;
-        done();
-      });
-    });
+      timedOut = childResult.timedOut;
+      exitCode = childResult.timedOut ? null : childResult.code;
+    } catch (err) {
+      spawnError = err as Error;
+    }
 
     if (spawnError) {
       const fallback = fallbackEngine(engine);
       if (fallback && isEngineLaunchError(spawnError)) {
-        stderr.write(fallbackNotice(engine, fallback, spawnError));
+        writeGoalAttemptStatus(fallbackNotice(engine, fallback, spawnError));
         cleanup();
         return await runExecGoalAttempt(
           cfg,
@@ -360,6 +542,14 @@ async function runExecGoalAttempt(
     }
 
     tail.drain();
+    if (childResult && childResult.code !== 0) {
+      writeGoalAttemptStatus(
+        formatQuietChildStderrTail(
+          "goal attempt engine",
+          childResult.stderrTail,
+        ),
+      );
+    }
     const lastAssistantMessage = existsSync(lastMsgPath)
       ? readFileSync(lastMsgPath, "utf-8")
       : undefined;
@@ -401,15 +591,21 @@ async function runExecGoalAttempt(
   }
 }
 
-export function resolveGoalAttemptMode(mode?: "exec" | "slash"): "exec" | "slash" {
+export function resolveGoalAttemptMode(
+  mode?: GoalRunner,
+  rawMode = process.env.DARWIN_GOAL_ATTEMPT_MODE,
+): GoalRunner {
   if (mode) return mode;
-  const raw = process.env.DARWIN_GOAL_ATTEMPT_MODE?.trim().toLowerCase();
-  return raw === "slash" || raw === "tui" || raw === "/goal" ? "slash" : "exec";
+  const raw = rawMode?.trim().toLowerCase();
+  if (raw === "exec" || raw === "noninteractive" || raw === "non-interactive") return "exec";
+  if (raw === "slash" || raw === "tui" || raw === "pty") return "slash";
+  if (raw === "initial" || raw === "prompt" || raw === "/goal") return "initial";
+  return "initial";
 }
 
 export function buildExecGoalPrompt(goal: string, maxDurationMs?: number): string {
   const cap = maxDurationMs
-    ? ` The external Darwin time cap is about ${Math.round(maxDurationMs / 1000)} seconds.`
+    ? ` The external Darwin time cap is about ${formatDurationMs(maxDurationMs)}.`
     : "";
   return `You are running under darwin goal-mode using the stable non-interactive exec runner. Work autonomously toward this goal, then stop when it is satisfied.${cap}\n\nGOAL:\n${goal.trim()}\n`;
 }
@@ -423,7 +619,7 @@ function goalKnobArgs(
 
   if (hasBypassApprovalsAndSandbox(selectedEngineArgs)) {
     if (knobs?.sandbox || knobs?.approval) {
-      stderr.write(
+      writeGoalAttemptStatus(
         "darwin: engine args already bypass approvals/sandbox; ignoring proposed sandbox/approval knobs for this goal attempt\n",
       );
     }
@@ -432,19 +628,104 @@ function goalKnobArgs(
 
   if (knobs?.sandbox) {
     if (hasSandboxArg(selectedEngineArgs)) {
-      stderr.write("darwin: engine args already set sandbox; ignoring proposed sandbox knob\n");
+      writeGoalAttemptStatus(
+        "darwin: engine args already set sandbox; ignoring proposed sandbox knob\n",
+      );
     } else {
       args.push("-s", knobs.sandbox);
     }
   }
   if (knobs?.approval) {
     if (hasApprovalArg(selectedEngineArgs)) {
-      stderr.write("darwin: engine args already set approval policy; ignoring proposed approval knob\n");
+      writeGoalAttemptStatus(
+        "darwin: engine args already set approval policy; ignoring proposed approval knob\n",
+      );
     } else {
       args.push("-a", knobs.approval);
     }
   }
   return args;
+}
+
+function writeGoalAttemptStatus(message: string): void {
+  writeTerminalStream(stderr, message);
+}
+
+export function buildInitialGoalPrompt(goalPath: string, maxDurationMs?: number): string {
+  const cap = maxDurationMs
+    ? ` Darwin will stop this attempt after about ${formatDurationMs(maxDurationMs)} or after hook activity goes quiet.`
+    : "";
+  return `/goal Read the goal details in ${goalPath} and complete that objective. Stop when the objective is satisfied.${cap}`;
+}
+
+function writeInitialGoalFile(
+  cfg: Required<Pick<GoalAttemptOptions, "goal" | "cwd">> & GoalAttemptOptions & typeof DEFAULTS,
+): string {
+  const dir = cfg.trajectoryPath
+    ? dirname(cfg.trajectoryPath)
+    : mkdtempSync(join(tmpdir(), "darwin-goal-attempt-"));
+  mkdirSync(dir, { recursive: true });
+  const goalPath = join(dir, "goal.md");
+  writeFileSync(
+    goalPath,
+    `# Darwin goal attempt\n\n${cfg.goal.trim()}\n\n---\n\nAttempt controls:\n- max duration: ${formatDurationMs(cfg.maxDurationMs)}\n- quiet window after last stop event: ${formatDurationMs(cfg.quietMs)}\n`,
+    "utf8",
+  );
+  return goalPath;
+}
+
+function formatGoalPathForPrompt(cwd: string, goalPath: string): string {
+  const rel = relative(cwd, goalPath);
+  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return rel;
+  return goalPath;
+}
+
+function withInteractiveGoalRuntimeArgs(existingArgs: string[], goalArgs: string[]): string[] {
+  const combined = [...existingArgs, ...goalArgs];
+  const args = [...goalArgs];
+  if (!hasFeatureConfig(combined, "goals")) {
+    args.push("-c", "features.goals=true");
+  }
+  if (!hasFeatureConfig(combined, "hooks")) {
+    args.push("-c", "features.hooks=true");
+  }
+  if (!hasDarwinStopHookConfig(combined)) {
+    args.push("-c", darwinStopHookConfigValue());
+  }
+  return args;
+}
+
+function hasFeatureConfig(args: string[], feature: string): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const next = args[i + 1];
+    if ((arg === "--enable" || arg === "--disable") && next === feature) return true;
+    if (arg === "-c" || arg === "--config") {
+      if (typeof next === "string" && next.startsWith(`features.${feature}=`)) return true;
+      i++;
+      continue;
+    }
+    if (arg.startsWith(`-cfeatures.${feature}=`)) return true;
+    if (arg.startsWith(`--config=features.${feature}=`)) return true;
+  }
+  return false;
+}
+
+function hasDarwinStopHookConfig(args: string[]): boolean {
+  return args.some((arg) => arg.includes("hooks.Stop") && arg.includes("darwin-hook stop"));
+}
+
+function darwinStopHookConfigValue(): string {
+  const command = `${shellQuote(process.execPath)} ${shellQuote(resolve(__dirname, "..", "cli", "hook.js"))} stop`;
+  return `hooks.Stop=[{hooks=[{type="command",command=${tomlString(command)},timeout=30,statusMessage="Darwin stop observer"}]}]`;
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function sleep(ms: number): Promise<void> {

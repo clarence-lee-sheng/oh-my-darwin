@@ -1,3 +1,5 @@
+import { formatErrorSummary } from "./diagnostics.js";
+
 export type EngineName = "codex" | "omx";
 
 export const DEFAULT_ENGINE: EngineName = "omx";
@@ -5,6 +7,7 @@ export const DEFAULT_OMX_ARGS = ["--madmax", "--xhigh"] as const;
 export const DEFAULT_CODEX_ARGS = [
   "--dangerously-bypass-approvals-and-sandbox",
 ] as const;
+export const DEFAULT_ENGINE_COMMAND_PREVIEW_CHARS = 240;
 
 export interface EngineSelection {
   engine: EngineName;
@@ -13,14 +16,13 @@ export interface EngineSelection {
 }
 
 function parseEngineName(raw: string | undefined): EngineName {
-  const value = (raw ?? process.env.DARWIN_ENGINE ?? DEFAULT_ENGINE)
-    .trim()
-    .toLowerCase();
+  const selected = raw ?? process.env.DARWIN_ENGINE ?? DEFAULT_ENGINE;
+  const value = selected.trim().toLowerCase();
 
   if (value === "codex" || value === "omx") return value;
 
   throw new Error(
-    `unsupported engine "${raw}". Expected "codex" or "omx".`,
+    `unsupported engine "${formatErrorSummary(selected, 80)}". Expected "codex" or "omx".`,
   );
 }
 
@@ -228,6 +230,17 @@ export function formatEngineCommand(
   return parts.map(shellQuoteIfNeeded).join(" ");
 }
 
+export function formatEngineCommandForLog(
+  engine: EngineName,
+  engineArgs: string[] = [],
+  limit = DEFAULT_ENGINE_COMMAND_PREVIEW_CHARS,
+): string {
+  return formatEngineCommandPreview(
+    formatEngineCommand(engine, redactGeneratedOutputArgs(engineArgs)),
+    limit,
+  );
+}
+
 /**
  * OMX can default to a detached tmux launch in interactive terminals. Darwin
  * needs child-process lifetime semantics for baseline/meta scoring, so default
@@ -264,7 +277,7 @@ export function fallbackNotice(
     ? (err as NodeJS.ErrnoException).code
     : undefined;
   const detail = code ? ` (${code})` : "";
-  return `darwin: ${engineCommand(engine)} could not launch${detail}; falling back to ${formatEngineCommand(fallback, resolveEngineArgs(fallback))}\n`;
+  return `darwin: ${engineCommand(engine)} could not launch${detail}; falling back to ${formatEngineCommandForLog(fallback, resolveEngineArgs(fallback))}\n`;
 }
 
 function splitArgs(raw: string): string[] {
@@ -425,7 +438,39 @@ function hasOption(args: string[], shortName: string, longName: string): boolean
   return false;
 }
 
+function redactGeneratedOutputArgs(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    out.push(arg);
+    if (arg === "--output-last-message" || arg === "--output-schema") {
+      if (i + 1 < args.length) {
+        out.push(redactedOutputToken(arg));
+        i++;
+      }
+      continue;
+    }
+    if (arg.startsWith("--output-last-message=")) {
+      out[out.length - 1] = "--output-last-message=OUTPUT_LAST_MESSAGE_PATH";
+    } else if (arg.startsWith("--output-schema=")) {
+      out[out.length - 1] = "--output-schema=OUTPUT_SCHEMA_PATH";
+    }
+  }
+  return out;
+}
+
+function redactedOutputToken(arg: string): string {
+  return arg === "--output-schema" ? "OUTPUT_SCHEMA_PATH" : "OUTPUT_LAST_MESSAGE_PATH";
+}
+
 function shellQuoteIfNeeded(value: string): string {
   if (/^[A-Za-z0-9_./:=@+-]+$/.test(value)) return value;
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function formatEngineCommandPreview(value: string, limit: number): string {
+  const normalized = value.replace(/\s+/g, " ");
+  if (normalized.length <= limit) return normalized;
+  if (limit <= 3) return normalized.slice(0, limit);
+  return `${normalized.slice(0, limit - 3)}...`;
 }

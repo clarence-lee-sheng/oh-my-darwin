@@ -1,4 +1,3 @@
-import readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import type { ScorerSpec } from "../spec/parse.js";
 import type { ScoreResult } from "./types.js";
@@ -9,7 +8,8 @@ import type { ScoreResult } from "./types.js";
  * non-number.
  */
 export async function humanScorer(_spec: ScorerSpec): Promise<ScoreResult> {
-  const rl = readline.createInterface({ input: stdin, output: stdout });
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: stdin, output: stdout });
   let score: number | null = null;
   let note: string | undefined;
   try {

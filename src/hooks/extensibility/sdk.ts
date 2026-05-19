@@ -19,7 +19,9 @@ export type LifecycleEvent =
 
 export type HookPayload = Record<string, unknown>;
 
-export type HookHandler = (payload: HookPayload) => void | Promise<void>;
+export type HookHandlerOutput = string | Record<string, unknown> | void;
+
+export type HookHandler = (payload: HookPayload) => HookHandlerOutput | Promise<HookHandlerOutput>;
 
 export interface DarwinPlugin {
   name: string;

@@ -8,6 +8,7 @@ import {
   resolveEngineArgs,
   type EngineName,
 } from "./engine.js";
+import { writeTerminalError } from "./terminal.js";
 
 export interface SpawnResult {
   child: ChildProcess;
@@ -37,7 +38,7 @@ export function spawnEngine(
     child.once("error", (err) => {
       const fallback = fallbackEngine(engine);
       if (fallback && isEngineLaunchError(err)) {
-        process.stderr.write(fallbackNotice(engine, fallback, err));
+        writeTerminalError(fallbackNotice(engine, fallback, err));
         spawnEngine(fallback, args, {
           cwd: options.cwd,
           engineArgs: resolveEngineArgs(fallback),
@@ -49,13 +50,19 @@ export function spawnEngine(
       }
       reject(err);
     });
-    child.once("exit", (code) => resolve({ engine, code: code ?? 0 }));
+    child.once("exit", (code, signal) => {
+      resolve({ engine, code: code ?? signalExitCode(signal) });
+    });
   });
-  const exit = exitInfo.then((info) => info.code);
+  const exit = exitInfo.then((info) => info.code, () => 1);
   return { child, exit, exitInfo };
 }
 
 /** Backward-compatible helper for the original Codex-only call sites. */
 export function spawnCodex(args: string[]): SpawnResult {
   return spawnEngine("codex", args);
+}
+
+function signalExitCode(signal: NodeJS.Signals | null): number {
+  return signal ? 1 : 0;
 }

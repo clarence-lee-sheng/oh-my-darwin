@@ -1,16 +1,7 @@
-import readline from "node:readline/promises";
-import { randomUUID } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { stdin, stdout, stderr } from "node:process";
+import { basename, join, resolve } from "node:path";
 import { DARWIN_DIR, PROJECT_FILE } from "../cli/constants.js";
+import { atomicJsonWrite, readJsonFile } from "../state/json-file.js";
 
 export interface DarwinProject {
   project_id: string;
@@ -65,15 +56,15 @@ export function localProjectPath(cwd: string = process.cwd()): string {
 }
 
 export function loadRegistry(home: string = darwinHome()): ProjectRegistry {
-  const path = registryPath(home);
-  if (!existsSync(path)) return { version: 1, projects: [] };
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf-8")) as ProjectRegistry;
-    if (parsed.version === 1 && Array.isArray(parsed.projects)) {
-      return parsed;
-    }
-  } catch {
-    // fall through to a safe empty registry
+  const parsed = readJsonFile<ProjectRegistry>(registryPath(home));
+  if (parsed?.version === 1 && Array.isArray(parsed.projects)) {
+    return {
+      version: 1,
+      projects: parsed.projects.flatMap((project) => {
+        const normalized = normalizeDarwinProject(project);
+        return normalized ? [normalized] : [];
+      }),
+    };
   }
   return { version: 1, projects: [] };
 }
@@ -82,32 +73,21 @@ export function saveRegistry(
   registry: ProjectRegistry,
   home: string = darwinHome(),
 ): void {
-  const path = registryPath(home);
-  mkdirSync(dirname(path), { recursive: true });
-  atomicJsonWrite(path, registry);
+  atomicJsonWrite(registryPath(home), registry);
 }
 
 export function readLocalProject(
   cwd: string = process.cwd(),
 ): DarwinProject | null {
-  const path = localProjectPath(cwd);
-  if (!existsSync(path)) return null;
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf-8")) as DarwinProject;
-    if (parsed.project_id && parsed.root_path) return parsed;
-  } catch {
-    // ignore corrupt local project file
-  }
-  return null;
+  const parsed = readJsonFile<unknown>(localProjectPath(cwd));
+  return normalizeDarwinProject(parsed);
 }
 
 export function writeLocalProject(
   cwd: string,
   project: DarwinProject,
 ): void {
-  const path = localProjectPath(cwd);
-  mkdirSync(dirname(path), { recursive: true });
-  atomicJsonWrite(path, project);
+  atomicJsonWrite(localProjectPath(cwd), project);
 }
 
 export function findProjectByExactRoot(
@@ -144,12 +124,16 @@ export function createProjectRecord(
 ): DarwinProject {
   const now = new Date().toISOString();
   return {
-    project_id: `proj_${randomUUID().replaceAll("-", "").slice(0, 20)}`,
+    project_id: newProjectId(),
     name,
     root_path: resolve(cwd),
     created_at: now,
     last_used_at: now,
   };
+}
+
+function newProjectId(): string {
+  return `proj_${globalThis.crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`;
 }
 
 export function upsertProject(
@@ -176,9 +160,7 @@ export function writeGlobalProject(
   project: DarwinProject,
   home: string = darwinHome(),
 ): void {
-  const path = globalProjectPath(project.project_id, home);
-  mkdirSync(dirname(path), { recursive: true });
-  atomicJsonWrite(path, project);
+  atomicJsonWrite(globalProjectPath(project.project_id, home), project);
 }
 
 export function registerProjectForCwd(
@@ -193,77 +175,30 @@ export function registerProjectForCwd(
   return saved;
 }
 
-/**
- * `darwin init` project selection:
- * - exact root_path match is auto-selected;
- * - otherwise, interactive users may choose an existing project or create one;
- * - non-interactive users get a new project for cwd.
- *
- * Selecting an existing project intentionally re-points its root_path to cwd.
- */
-export async function selectProjectForInit(
-  cwd: string = process.cwd(),
-  home: string = darwinHome(),
-): Promise<DarwinProject> {
-  const exact = findProjectByExactRoot(cwd, home);
-  if (exact) {
-    const selected = upsertProject(exact, home);
-    writeLocalProject(cwd, selected);
-    stderr.write(
-      `darwin: using existing project ${selected.name} (${selected.project_id})\n`,
-    );
-    return selected;
-  }
-
-  const registry = loadRegistry(home);
-  if (!stdin.isTTY || registry.projects.length === 0) {
-    const created = registerProjectForCwd(cwd, home);
-    stderr.write(
-      `darwin: registered new project ${created.name} (${created.project_id})\n`,
-    );
-    return created;
-  }
-
-  stdout.write("\ndarwin: no project registered for this exact root_path.\n");
-  stdout.write("Choose an existing project to attach here, or create a new one:\n");
-  stdout.write("  n) create new project (default)\n");
-  registry.projects.forEach((p, idx) => {
-    stdout.write(`  ${idx + 1}) ${p.name} — ${p.root_path} (${p.project_id})\n`);
-  });
-
-  const rl = readline.createInterface({ input: stdin, output: stdout });
-  try {
-    const raw = (await rl.question("> ")).trim().toLowerCase();
-    const choice = Number(raw);
-    if (Number.isInteger(choice) && choice >= 1 && choice <= registry.projects.length) {
-      const selected = {
-        ...registry.projects[choice - 1],
-        root_path: resolve(cwd),
-      };
-      const saved = upsertProject(selected, home);
-      writeLocalProject(cwd, saved);
-      stderr.write(
-        `darwin: attached existing project ${saved.name} (${saved.project_id}) to ${saved.root_path}\n`,
-      );
-      return saved;
-    }
-  } finally {
-    rl.close();
-  }
-
-  const created = registerProjectForCwd(cwd, home);
-  stderr.write(
-    `darwin: registered new project ${created.name} (${created.project_id})\n`,
-  );
-  return created;
-}
-
 export function listProjects(home: string = darwinHome()): DarwinProject[] {
   return loadRegistry(home).projects;
 }
 
-function atomicJsonWrite(path: string, value: unknown): void {
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n");
-  renameSync(tmp, path);
+function normalizeDarwinProject(value: unknown): DarwinProject | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const project = value as Partial<DarwinProject>;
+  if (!isNonEmptyString(project.project_id) || !isNonEmptyString(project.root_path)) {
+    return null;
+  }
+  const created = isNonEmptyString(project.created_at) ? project.created_at : "";
+  return {
+    project_id: project.project_id,
+    name: isNonEmptyString(project.name)
+      ? project.name
+      : basename(project.root_path) || project.project_id,
+    root_path: project.root_path,
+    created_at: created,
+    last_used_at: isNonEmptyString(project.last_used_at)
+      ? project.last_used_at
+      : created,
+  };
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }

@@ -1,19 +1,6 @@
 #!/usr/bin/env node
-import { ensureHooks, setup } from "./setup.js";
-import { run } from "./run.js";
-import { runHook } from "./hook.js";
-import { init } from "./init.js";
-import { baseline } from "./baseline.js";
-import { meta } from "./meta.js";
-import { status } from "./status.js";
-import { projects } from "./projects.js";
-import { capabilities } from "./capabilities.js";
-import {
-  engineLabel,
-  extractEngineSelection,
-  formatEngineCommand,
-  resolveEngineArgs,
-} from "../runtime/engine.js";
+import { formatErrorSummary } from "../runtime/diagnostics.js";
+import { writeCliError, writeCliOutput } from "./display.js";
 
 const SUBCOMMANDS = new Set([
   "init",
@@ -30,13 +17,52 @@ const SUBCOMMANDS = new Set([
 ]);
 
 async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  const rawCommand = splitCommand(argv);
+  switch (rawCommand.first) {
+    case "status": {
+      const { status } = await import("./status.js");
+      await status();
+      return;
+    }
+    case "projects":
+    case "list": {
+      const { projects } = await import("./projects.js");
+      projects();
+      return;
+    }
+    case "capabilities": {
+      const { capabilities } = await import("./capabilities.js");
+      await capabilities();
+      return;
+    }
+    case "setup": {
+      const { setup } = await import("./setup.js");
+      setup();
+      return;
+    }
+    case "hook": {
+      const { runHook } = await import("./hook.js");
+      await runHook(rawCommand.rest);
+      return;
+    }
+    case "--help":
+    case "-h": {
+      const summary = await helpEngineSummary(argv);
+      printUsage(summary.label, summary.command);
+      return;
+    }
+  }
+
+  const {
+    extractEngineSelection,
+    resolveEngineArgs,
+  } = await import("../runtime/engine.js");
   const {
     engine,
     args: selectedArgs,
     engineArgs: selectedEngineArgs,
-  } = extractEngineSelection(
-    process.argv.slice(2),
-  );
+  } = extractEngineSelection(argv);
   const command = splitCommand(selectedArgs);
   const engineArgs = resolveEngineArgs(engine, [
     ...selectedEngineArgs,
@@ -47,43 +73,31 @@ async function main(): Promise<void> {
 
   // Explicit subcommands.
   switch (first) {
-    case "init":
+    case "init": {
+      const { init } = await import("./init.js");
       await init(engine, engineArgs);
       return;
-    case "baseline":
+    }
+    case "baseline": {
+      const { baseline } = await import("./baseline.js");
       await baseline(engine, engineArgs);
       return;
-    case "meta":
+    }
+    case "meta": {
+      const { meta } = await import("./meta.js");
       await meta(rest, engine, engineArgs);
       return;
-    case "status":
-      status();
-      return;
-    case "projects":
-    case "list":
-      projects();
-      return;
-    case "capabilities":
-      capabilities();
-      return;
-    case "setup":
-      setup();
-      return;
-    case "hook":
-      await runHook(rest);
-      return;
-    case "--help":
-    case "-h":
-      printUsage(engine, engineArgs);
-      return;
+    }
   }
 
   // Default: auto-install hooks if missing, then spawn the selected engine with
   // passthrough args.
+  const { ensureHooks } = await import("./setup.js");
   if (ensureHooks()) {
-    process.stderr.write("darwin: installed .codex/hooks.json\n");
+    writeCliError("darwin: installed .codex/hooks.json");
   }
   const args = first === undefined ? [] : [first, ...rest];
+  const { run } = await import("./run.js");
   const code = await run(args, engine, engineArgs);
   process.exit(code);
 }
@@ -93,7 +107,7 @@ function splitCommand(args: string[]): {
   rest: string[];
   leadingEngineArgs: string[];
 } {
-  const idx = args.findIndex((arg) => SUBCOMMANDS.has(arg));
+  const idx = subcommandIndex(args);
   if (idx > 0) {
     return {
       first: args[idx],
@@ -108,29 +122,73 @@ function splitCommand(args: string[]): {
   };
 }
 
+function subcommandIndex(args: string[]): number {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--engine" || arg === "--engine-arg" || arg === "--engine-args") {
+      i++;
+      continue;
+    }
+    if (SUBCOMMANDS.has(arg)) return i;
+  }
+  return -1;
+}
+
+async function helpEngineSummary(
+  argv: string[],
+): Promise<{ label: string; command: string }> {
+  try {
+    const {
+      engineLabel,
+      extractEngineSelection,
+      formatEngineCommandForLog,
+      resolveEngineArgs,
+    } = await import("../runtime/engine.js");
+    const selected = extractEngineSelection(argv);
+    const engineArgs = resolveEngineArgs(selected.engine, selected.engineArgs);
+    return {
+      label: engineLabel(selected.engine),
+      command: formatEngineCommandForLog(selected.engine, engineArgs),
+    };
+  } catch (err) {
+    return {
+      label: "invalid engine configuration",
+      command: `unavailable (${formatErrorSummary(err)})`,
+    };
+  }
+}
+
 function printUsage(
-  engine = extractEngineSelection([]).engine,
-  engineArgs = resolveEngineArgs(
-    extractEngineSelection([]).engine,
-    extractEngineSelection([]).engineArgs,
-  ),
+  selectedEngineLabel: string,
+  selectedEngineCommand: string,
 ): void {
-  console.log(`darwin — meta-harness on-ramp (wraps Codex or OMX)
+  writeCliOutput(`darwin - meta-harness on-ramp (wraps Codex or OMX)
 
 usage:
   darwin [agent args...]         auto-install hooks, then launch selected engine
   darwin init                    start a new meta-loop project (interview)
   darwin baseline                run the task once, record initial score
   darwin meta [--iterations N] [--duration 90s|30m|2h|1d] [--interactive]
-              [--goal-mode] [--attempt-max 30m] [--attempt-quiet 60s]
-              [--goal-runner exec|slash]
-                                 propose → execute → score → repeat
+              [--goal-mode|--harness-mode] [--attempt-max 30m] [--attempt-quiet 60s]
+              [--goal-runner initial|exec|slash]
+              [--proposer-runner exec|interactive]
+              [--interactive-proposer|--interactive-propose]
+                                 propose -> execute -> score -> repeat
                                  (default: unbounded; runs until user stops or proposer stuck)
-                                 --goal-mode: use Codex /goal as the attempt primitive
+                                 default mode: goal-mode
+                                 --harness-mode: use harness proposal/execution instead
+                                 proposer default: interactive terminal session
+                                              (use --proposer-runner exec for
+                                              quiet bounded automation)
+                                 --interactive-proposer / --interactive-propose:
+                                              aliases for the default
+                                 --goal-mode: explicit spelling of the default;
+                                              use Codex /goal as attempt primitive
                                               (proposer outputs goal+knobs instead of a harness)
                                               honors --omx/--codex engine selection
-                                 --goal-runner: exec is stable default; slash keeps
-                                                experimental interactive /goal injection
+                                 --goal-runner: default initial /goal prompt;
+                                                exec = non-slash automation;
+                                                slash = legacy TUI /goal injection
   darwin status                  show project/frontier/capability status
   darwin projects                list ~/.darwin registered projects
   darwin capabilities            list active/stale project capabilities
@@ -156,12 +214,12 @@ examples:
   darwin --codex --sandbox read-only baseline
   DARWIN_ENGINE=omx DARWIN_ENGINE_ARGS="--madmax --xhigh" darwin meta
 
-selected/default engine: ${engineLabel(engine)}
-selected/default command: ${formatEngineCommand(engine, engineArgs)}
+selected/default engine: ${selectedEngineLabel}
+selected/default command: ${selectedEngineCommand}
 `);
 }
 
 main().catch((err) => {
-  process.stderr.write(`darwin: ${err}\n`);
+  writeCliError(`darwin: ${formatErrorSummary(err)}`);
   process.exit(1);
 });

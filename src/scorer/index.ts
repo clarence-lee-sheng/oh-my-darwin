@@ -1,11 +1,16 @@
-import { stderr } from "node:process";
+import { formatErrorSummary } from "../runtime/diagnostics.js";
+import { writeTerminalError } from "../runtime/terminal.js";
 import type { ScorerSpec } from "../spec/parse.js";
-import { commandScorer } from "./command.js";
-import { humanScorer } from "./human.js";
-import { testSuiteScorer } from "./suite.js";
+import type { ScorerCommandOptions } from "./command.js";
 import type { ScoreResult } from "./types.js";
 
 export type { ScoreResult } from "./types.js";
+
+const SCORER_SOURCE_SUMMARY_LIMIT = 120;
+
+function formatScorerSource(source: unknown): string {
+  return formatErrorSummary(source, SCORER_SOURCE_SUMMARY_LIMIT);
+}
 
 /**
  * Dispatch to the scorer declared in meta-spec.md.
@@ -25,50 +30,78 @@ export type { ScoreResult } from "./types.js";
 export async function scoreRun(
   scorerSpec: ScorerSpec,
   runDir: string,
+  options: ScorerCommandOptions = {},
 ): Promise<ScoreResult> {
   if (scorerSpec.is_default) {
-    stderr.write(
-      "darwin: no `## Scorer` section in meta-spec.md; falling back to human prompt.\n",
+    writeTerminalError(
+      "darwin: no `## Scorer` section in meta-spec.md; falling back to human prompt.",
     );
-    return humanScorer(scorerSpec);
+    return runHumanScorer(scorerSpec);
   }
 
   try {
     switch (scorerSpec.source) {
       case "human":
-        return await humanScorer(scorerSpec);
+        return await runHumanScorer(scorerSpec);
 
       case "command":
-        return await commandScorer(scorerSpec, runDir);
+        return await runCommandScorer(scorerSpec, runDir, options);
 
       case "test-suite":
-        return await testSuiteScorer(scorerSpec, runDir);
+        return await runTestSuiteScorer(scorerSpec, runDir, options);
 
       case "llm-judge":
-        stderr.write(
-          "darwin: scorer 'llm-judge' is not yet implemented; not falling back to human verification.\n",
+        writeTerminalError(
+          "darwin: scorer 'llm-judge' is not yet implemented; not falling back to human verification.",
         );
         return {
           score: null,
           note: "llm-judge scorer is not implemented yet",
         };
 
-      default:
-        stderr.write(
-          `darwin: unknown scorer source '${scorerSpec.source}'; not falling back to human verification.\n`,
+      default: {
+        const source = formatScorerSource(scorerSpec.source);
+        writeTerminalError(
+          `darwin: unknown scorer source '${source}'; not falling back to human verification.`,
         );
         return {
           score: null,
-          note: `unknown scorer source: ${String(scorerSpec.source)}`,
+          note: `unknown scorer source: ${source}`,
         };
+      }
     }
   } catch (e) {
-    stderr.write(
-      `darwin: scorer '${scorerSpec.source}' failed (${e}); recording a skipped score.\n`,
+    const source = formatScorerSource(scorerSpec.source);
+    const message = formatErrorSummary(e);
+    writeTerminalError(
+      `darwin: scorer '${source}' failed (${message}); recording a skipped score.`,
     );
     return {
       score: null,
-      note: `scorer '${scorerSpec.source}' failed: ${String(e).slice(0, 200)}`,
+      note: `scorer '${source}' failed: ${message}`,
     };
   }
+}
+
+async function runHumanScorer(scorerSpec: ScorerSpec): Promise<ScoreResult> {
+  const { humanScorer } = await import("./human.js");
+  return humanScorer(scorerSpec);
+}
+
+async function runCommandScorer(
+  scorerSpec: ScorerSpec,
+  runDir: string,
+  options: ScorerCommandOptions,
+): Promise<ScoreResult> {
+  const { commandScorer } = await import("./command.js");
+  return commandScorer(scorerSpec, runDir, options);
+}
+
+async function runTestSuiteScorer(
+  scorerSpec: ScorerSpec,
+  runDir: string,
+  options: ScorerCommandOptions,
+): Promise<ScoreResult> {
+  const { testSuiteScorer } = await import("./suite.js");
+  return testSuiteScorer(scorerSpec, runDir, options);
 }

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   engineExecArgs,
+  formatEngineCommandForLog,
   engineInteractiveArgs,
   stripApprovalSandboxArgs,
 } from "../dist/runtime/engine.js";
@@ -51,4 +52,36 @@ test("stripApprovalSandboxArgs preserves model/reasoning while removing policy f
     ]),
     ["-m", "gpt-test", "-c", 'model_reasoning_effort="high"'],
   );
+});
+
+test("formatEngineCommandForLog redacts generated output paths", () => {
+  const formatted = formatEngineCommandForLog("codex", [
+    "exec",
+    "--output-last-message",
+    "/tmp/darwin-goal-attempt-abc/last.txt",
+    "--output-schema=/tmp/darwin/schema.json",
+    "--color",
+    "never",
+    "-",
+  ]);
+
+  assert.match(formatted, /--output-last-message/);
+  assert.match(formatted, /OUTPUT_LAST_MESSAGE_PATH/);
+  assert.match(formatted, /--output-schema=OUTPUT_SCHEMA_PATH/);
+  assert.doesNotMatch(formatted, /darwin-goal-attempt-abc/);
+  assert.doesNotMatch(formatted, /schema\.json/);
+});
+
+test("formatEngineCommandForLog keeps command previews single-line and bounded", () => {
+  const formatted = formatEngineCommandForLog("codex", [
+    "exec",
+    "--flag",
+    `bad\n${"x".repeat(500)}`,
+  ]);
+
+  assert.match(formatted, /bad x+/);
+  assert.doesNotMatch(formatted, /bad\n/);
+  assert.doesNotMatch(formatted, /x{300}/);
+  assert.ok(formatted.length <= 240);
+  assert.match(formatted, /\.\.\.$/);
 });

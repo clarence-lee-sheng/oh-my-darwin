@@ -1,26 +1,32 @@
-import readline from "node:readline/promises";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { stdin, stdout, stderr } from "node:process";
+import { stdin, stdout } from "node:process";
 import {
   DARWIN_DIR,
   INIT_DIR,
   META_SPEC_FILE,
   TRANSCRIPT_FILE,
 } from "../cli/constants.js";
-import { scanBrownfield } from "./brownfield.js";
-import { buildSystemPrompt } from "./prompt.js";
-import { callInterviewer, type Turn } from "./codex-call.js";
+import { writeCliError } from "../cli/display.js";
 import { meanAmbiguity, type Envelope } from "./schema.js";
+import { createOpeningEnvelope } from "./opening.js";
 import {
   DEFAULT_ENGINE,
   engineLabel,
   resolveEngineArgs,
   type EngineName,
 } from "../runtime/engine.js";
+import { formatErrorSummary } from "../runtime/diagnostics.js";
+import { writeTerminalStream } from "../runtime/terminal.js";
 
 const MAX_TURNS = 15;
 const AMBIGUITY_THRESHOLD = 0.2;
+const SPEC_DISPLAY_PATH = `${DARWIN_DIR}/${META_SPEC_FILE}`;
+
+interface Turn {
+  role: "user" | "assistant";
+  content: string;
+}
 
 export async function runInterview(
   engine: EngineName = DEFAULT_ENGINE,
@@ -36,67 +42,112 @@ export async function runInterview(
   // Truncate any prior transcript at the start of a fresh interview.
   writeFileSync(transcriptPath, "");
 
-  stderr.write("darwin: scanning project...\n");
-  const brownfield = scanBrownfield(cwd);
-  const systemPrompt = buildSystemPrompt(brownfield);
-  stderr.write(
-    brownfield.trim().length > 0
-      ? `darwin: scan captured ${brownfield.length} chars of context\n`
-      : "darwin: empty project (no brownfield context)\n",
-  );
-
-  const rl = readline.createInterface({ input: stdin, output: stdout });
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: stdin, output: stdout });
   const history: Turn[] = [{ role: "user", content: "<begin interview>" }];
 
   let lastEnv: Envelope | null = null;
   let forcedDone = false;
 
   try {
-    stderr.write(`darwin: starting interview (${engineLabel(engine)})\n`);
-    for (let turn = 0; turn < MAX_TURNS; turn++) {
-      stderr.write(`\ndarwin: thinking (turn ${turn + 1})...\n`);
-      const env = await callInterviewer(systemPrompt, history, engine, engineArgs);
-      lastEnv = env;
+    writeCliError(`darwin: starting interview (${engineLabel(engine)})`);
+    const opening = createOpeningEnvelope();
+    lastEnv = opening;
+    if (opening.spec_draft) {
+      writeFileSync(specPath, opening.spec_draft);
+    }
+    appendTranscript(transcriptPath, {
+      turn: 1,
+      envelope: opening,
+    });
 
-      // Persist progress every turn so ^C leaves a useful draft.
-      if (env.spec_draft) {
-        writeFileSync(specPath, env.spec_draft);
-      }
+    writeInterviewOutput(
+      `\n[1] ${formatInterviewQuestionForTerminal(opening.next_question)}\n`,
+    );
+    const firstAnswer = (await rl.question("> ")).trim();
+
+    if (firstAnswer === "/done") {
+      forcedDone = true;
+      writeCliError("darwin: user requested /done, finalizing");
+    } else if (firstAnswer === "/quit") {
+      writeCliError(
+        "darwin: user requested /quit, leaving partial spec in place",
+      );
+      return;
+    } else {
+      history.push({ role: "assistant", content: JSON.stringify(opening) });
+      history.push({ role: "user", content: firstAnswer });
       appendTranscript(transcriptPath, {
-        turn: turn + 1,
-        envelope: env,
+        turn: 1,
+        user_answer: firstAnswer,
       });
+    }
 
-      const mean = meanAmbiguity(env.ambiguity);
-      if (env.done || mean <= AMBIGUITY_THRESHOLD) {
-        stderr.write(
-          `\ndarwin: ambiguity ${mean.toFixed(2)} ≤ ${AMBIGUITY_THRESHOLD}, finalizing\n`,
+    if (!forcedDone) {
+      const [
+        { scanBrownfield },
+        { buildSystemPrompt },
+        { callInterviewer },
+      ] = await Promise.all([
+        import("./brownfield.js"),
+        import("./prompt.js"),
+        import("./codex-call.js"),
+      ]);
+      writeCliError("darwin: scanning project...");
+      const brownfield = scanBrownfield(cwd);
+      const systemPrompt = buildSystemPrompt(brownfield);
+      writeCliError(
+        brownfield.trim().length > 0
+          ? `darwin: scan captured ${brownfield.length} chars of context`
+          : "darwin: empty project (no brownfield context)",
+      );
+
+      for (let turn = 1; turn < MAX_TURNS; turn++) {
+        writeCliError(`\ndarwin: thinking (turn ${turn + 1})...`);
+        const env = await callInterviewer(systemPrompt, history, engine, engineArgs);
+        lastEnv = env;
+
+        // Persist progress every turn so ^C leaves a useful draft.
+        if (env.spec_draft) {
+          writeFileSync(specPath, env.spec_draft);
+        }
+        appendTranscript(transcriptPath, {
+          turn: turn + 1,
+          envelope: env,
+        });
+
+        const mean = meanAmbiguity(env.ambiguity);
+        if (env.done || mean <= AMBIGUITY_THRESHOLD) {
+          writeCliError(
+            `\ndarwin: ambiguity ${mean.toFixed(2)} <= ${AMBIGUITY_THRESHOLD}, finalizing`,
+          );
+          break;
+        }
+
+        writeInterviewOutput(
+          `\n[${turn + 1}] ${formatInterviewQuestionForTerminal(env.next_question)}\n`,
         );
-        break;
-      }
+        const answer = (await rl.question("> ")).trim();
 
-      stdout.write(`\n[${turn + 1}] ${env.next_question}\n`);
-      const answer = (await rl.question("> ")).trim();
+        if (answer === "/done") {
+          forcedDone = true;
+          writeCliError("darwin: user requested /done, finalizing");
+          break;
+        }
+        if (answer === "/quit") {
+          writeCliError(
+            "darwin: user requested /quit, leaving partial spec in place",
+          );
+          return;
+        }
 
-      if (answer === "/done") {
-        forcedDone = true;
-        stderr.write("darwin: user requested /done, finalizing\n");
-        break;
+        history.push({ role: "assistant", content: JSON.stringify(env) });
+        history.push({ role: "user", content: answer });
+        appendTranscript(transcriptPath, {
+          turn: turn + 1,
+          user_answer: answer,
+        });
       }
-      if (answer === "/quit") {
-        stderr.write(
-          "darwin: user requested /quit, leaving partial spec in place\n",
-        );
-        rl.close();
-        return;
-      }
-
-      history.push({ role: "assistant", content: JSON.stringify(env) });
-      history.push({ role: "user", content: answer });
-      appendTranscript(transcriptPath, {
-        turn: turn + 1,
-        user_answer: answer,
-      });
     }
   } finally {
     rl.close();
@@ -115,28 +166,40 @@ async function finalize(
   forcedDone: boolean,
 ): Promise<void> {
   if (!env) {
-    stderr.write("darwin: no interview turns completed; nothing written\n");
+    writeCliError("darwin: no interview turns completed; nothing written");
     return;
   }
 
   // Final spec write (idempotent — same content as last per-turn write).
   if (env.spec_draft) writeFileSync(specPath, env.spec_draft);
 
-  stdout.write(`\ndarwin: wrote ${specPath}\n`);
+  writeInterviewOutput(`\ndarwin: wrote ${SPEC_DISPLAY_PATH}\n`);
 
   if (env.safety_notes && env.safety_notes.length > 0) {
-    stdout.write("\ndarwin: SAFETY NOTES from interviewer:\n");
+    writeInterviewOutput("\ndarwin: SAFETY NOTES from interviewer:\n");
     for (const note of env.safety_notes) {
-      stdout.write(`  - ${note}\n`);
+      writeInterviewOutput(`  - ${formatSafetyNoteForTerminal(note)}\n`);
     }
-    stdout.write(
+    writeInterviewOutput(
       "\nReview these and the spec before running `darwin baseline` or `darwin meta`.\n",
     );
   }
 
   if (forcedDone) {
-    stdout.write(
-      "\ndarwin: spec was finalized early via /done — review for completeness.\n",
+    writeInterviewOutput(
+      "\ndarwin: spec was finalized early via /done - review for completeness.\n",
     );
   }
+}
+
+function writeInterviewOutput(message: string): void {
+  writeTerminalStream(stdout, message);
+}
+
+export function formatInterviewQuestionForTerminal(value: unknown): string {
+  return formatErrorSummary(value);
+}
+
+export function formatSafetyNoteForTerminal(value: unknown): string {
+  return formatErrorSummary(value);
 }

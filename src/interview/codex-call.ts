@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import {
   mkdtempSync,
   readFileSync,
@@ -21,11 +20,21 @@ import {
   stripApprovalSandboxArgs,
   type EngineName,
 } from "../runtime/engine.js";
+import { resolvePositiveInt } from "../runtime/diagnostics.js";
+import { runQuietChild } from "../runtime/quiet-child.js";
+import { writeTerminalError } from "../runtime/terminal.js";
 
 export interface Turn {
   role: "user" | "assistant";
   content: string;
 }
+
+export interface CallInterviewerOptions {
+  timeoutMsRaw?: string;
+}
+
+const DEFAULT_INTERVIEWER_TIMEOUT_MS = 2 * 60 * 1000;
+const MAX_INTERVIEWER_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * Single round-trip to the interviewer: serialize the conversation,
@@ -37,18 +46,20 @@ export async function callInterviewer(
   history: Turn[],
   engine: EngineName = DEFAULT_ENGINE,
   engineArgs: string[] = resolveEngineArgs(engine),
+  options: CallInterviewerOptions = {},
 ): Promise<Envelope> {
   try {
-    return await callInterviewerOnce(systemPrompt, history, engine, engineArgs);
+    return await callInterviewerOnce(systemPrompt, history, engine, engineArgs, options);
   } catch (err) {
     const fallback = fallbackEngine(engine);
     if (fallback && isEngineLaunchError(err)) {
-      process.stderr.write(fallbackNotice(engine, fallback, err));
+      writeTerminalError(fallbackNotice(engine, fallback, err));
       return callInterviewerOnce(
         systemPrompt,
         history,
         fallback,
         resolveEngineArgs(fallback),
+        options,
       );
     }
     throw err;
@@ -60,6 +71,7 @@ async function callInterviewerOnce(
   history: Turn[],
   engine: EngineName,
   engineArgs: string[],
+  options: CallInterviewerOptions,
 ): Promise<Envelope> {
   const dir = mkdtempSync(join(tmpdir(), "hyp-init-"));
   const schemaPath = join(dir, "schema.json");
@@ -84,61 +96,47 @@ async function callInterviewerOnce(
       fullPrompt,
     ],
   );
+  const timeoutMs = resolveInterviewerTimeoutMs(
+    options.timeoutMsRaw ?? process.env.DARWIN_INTERVIEWER_TIMEOUT_MS,
+  );
 
-  return new Promise<Envelope>((resolve, reject) => {
-    const child = spawn(
-      engineCommand(engine),
-      execArgs,
-      // Swallow stdout (the agent may echo the prompt + status banner there);
-      // we only care about the file at outPath. Capture stderr so a
-      // non-zero exit can surface a meaningful message instead of a
-      // bare exit code.
-      { stdio: ["ignore", "ignore", "pipe"], env: engineEnv(engine) },
-    );
-
-    let stderrBuf = "";
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderrBuf += chunk.toString();
+  try {
+    const result = await runQuietChild({
+      command: engineCommand(engine),
+      args: execArgs,
+      cwd: process.cwd(),
+      env: engineEnv(engine),
+      input: "",
+      timeoutMs,
+      timeoutLabel: "interviewer",
+      writeStatus: writeTerminalError,
     });
-
-    child.on("error", (err) => {
-      cleanup();
-      reject(err);
-    });
-
-    child.on("exit", (code) => {
-      try {
-        if (code !== 0) {
-          const tail = stderrBuf.trim().slice(-800);
-          throw new Error(
-            `${engineExecLabel(engine)} exited with code ${code}${tail ? `\n${tail}` : ""}`,
-          );
-        }
-        const raw = readFileSync(outPath, "utf-8").trim();
-        if (!raw) {
-          throw new Error(`${engineExecLabel(engine)} produced empty output`);
-        }
-        const env = JSON.parse(stripCodeFences(raw)) as Envelope;
-        resolve(env);
-      } catch (e) {
-        reject(e);
-      } finally {
-        cleanup();
-      }
-    });
-
-    function cleanup() {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        /* ignore */
-      }
+    if (result.code !== 0) {
+      const tail = result.stderrTail.trim();
+      throw new Error(
+        `${engineExecLabel(engine)} exited with code ${result.code}${tail ? `\n${tail}` : ""}`,
+      );
     }
-  });
+    const raw = readFileSync(outPath, "utf-8").trim();
+    if (!raw) {
+      throw new Error(`${engineExecLabel(engine)} produced empty output`);
+    }
+    return JSON.parse(stripCodeFences(raw)) as Envelope;
+  } finally {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 /** Defensive: even with --output-schema, models sometimes wrap in ```json. */
 function stripCodeFences(s: string): string {
   const m = s.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
   return m ? m[1] : s;
+}
+
+export function resolveInterviewerTimeoutMs(raw: string | undefined): number {
+  return resolvePositiveInt(raw, DEFAULT_INTERVIEWER_TIMEOUT_MS, MAX_INTERVIEWER_TIMEOUT_MS);
 }

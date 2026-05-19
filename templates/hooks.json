@@ -1,7 +1,80 @@
 {
-  "pre_tool_use":       "darwin-hook pre_tool_use",
-  "post_tool_use":      "darwin-hook post_tool_use",
-  "session_start":      "darwin-hook session_start",
-  "user_prompt_submit": "darwin-hook user_prompt_submit",
-  "stop":               "darwin-hook stop"
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "darwin-hook session_start",
+            "statusMessage": "Darwin session observer",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "darwin-hook pre_tool_use",
+            "statusMessage": "Darwin pre-tool observer",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "darwin-hook permission_request",
+            "statusMessage": "Darwin permission observer",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "darwin-hook post_tool_use",
+            "statusMessage": "Darwin post-tool observer",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "darwin-hook user_prompt_submit",
+            "statusMessage": "Darwin prompt observer",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "darwin-hook stop",
+            "statusMessage": "Darwin stop observer",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
 }

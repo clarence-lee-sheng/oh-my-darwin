@@ -1,12 +1,6 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { FRONTIER_FILE, DARWIN_DIR } from "../cli/constants.js";
+import { atomicJsonWrite, readJsonFile } from "./json-file.js";
 
 export interface FrontierRecord {
   /** Identifier of the winning attempt (e.g. "baseline", "iter-3"). */
@@ -26,27 +20,25 @@ function frontierPath(cwd: string): string {
 }
 
 export function readFrontier(cwd: string = process.cwd()): FrontierRecord | null {
-  const p = frontierPath(cwd);
-  if (!existsSync(p)) return null;
-  try {
-    return JSON.parse(readFileSync(p, "utf-8")) as FrontierRecord;
-  } catch {
-    return null;
-  }
+  const parsed = readJsonFile<unknown>(frontierPath(cwd));
+  return isFrontierRecord(parsed) ? parsed : null;
 }
 
-/**
- * Atomic write: serialize to a temp file, fsync via writeFileSync, then
- * rename over the target. A crash mid-write leaves the previous
- * frontier intact.
- */
+/** Persist the frontier through the shared atomic JSON writer. */
 export function writeFrontier(
   record: FrontierRecord,
   cwd: string = process.cwd(),
 ): void {
-  const p = frontierPath(cwd);
-  mkdirSync(dirname(p), { recursive: true });
-  const tmp = p + ".tmp";
-  writeFileSync(tmp, JSON.stringify(record, null, 2) + "\n");
-  renameSync(tmp, p);
+  atomicJsonWrite(frontierPath(cwd), record);
+}
+
+function isFrontierRecord(value: unknown): value is FrontierRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Partial<FrontierRecord>;
+  return (
+    typeof record.attempt_id === "string" &&
+    record.attempt_id.length > 0 &&
+    (record.score === null || typeof record.score === "number") &&
+    typeof record.t === "string"
+  );
 }

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
-import { stderr } from "node:process";
 import { pathToFileURL } from "node:url";
+import { formatErrorSummary, formatPathForTerminal } from "../runtime/diagnostics.js";
+import { writeTerminalError } from "../runtime/terminal.js";
 import type { StrategyHooks } from "../strategy/contract.js";
 
 export interface Harness extends StrategyHooks {
@@ -33,7 +34,7 @@ const STRATEGY_HOOK_NAMES = [
  */
 export async function loadAndValidate(path: string): Promise<Harness> {
   if (!existsSync(path)) {
-    throw new Error(`harness file missing: ${path}`);
+    throw new Error(`harness file missing: ${formatHarnessPathForTerminal(path)}`);
   }
 
   const url = pathToFileURL(path).href + `?t=${Date.now()}`;
@@ -55,8 +56,8 @@ export async function loadAndValidate(path: string): Promise<Harness> {
   for (const name of STRATEGY_HOOK_NAMES) {
     const v = (h as Record<string, unknown>)[name];
     if (v !== undefined && typeof v !== "function") {
-      stderr.write(
-        `darwin: harness ${name} is not a function (got ${typeof v}); will use default\n`,
+      writeTerminalError(
+        `darwin: harness ${name} is not a function (got ${typeof v}); will use default`,
       );
       delete (h as Record<string, unknown>)[name];
     }
@@ -66,11 +67,18 @@ export async function loadAndValidate(path: string): Promise<Harness> {
   try {
     result = h.buildPrompt("smoketest");
   } catch (e) {
-    throw new Error(`buildPrompt threw on smoketest: ${e}`);
+    throw new Error(`buildPrompt threw on smoketest: ${formatErrorSummary(e)}`);
   }
   if (typeof result !== "string" || result.length === 0) {
     throw new Error("buildPrompt did not return a non-empty string on smoketest");
   }
 
   return h as Harness;
+}
+
+export function formatHarnessPathForTerminal(
+  path: string,
+  cwd = process.cwd(),
+): string {
+  return formatPathForTerminal(path, { cwd });
 }

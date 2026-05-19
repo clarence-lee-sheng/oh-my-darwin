@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DARWIN_DIR, META_SPEC_FILE } from "../cli/constants.js";
+import { formatPathForTerminal } from "../runtime/diagnostics.js";
 
 export type ScorerSource = "human" | "command" | "test-suite" | "llm-judge";
 export type ScorerDirection = "higher_is_better" | "lower_is_better";
@@ -56,7 +57,7 @@ export function readSpec(cwd: string = process.cwd()): SpecSlice {
   const path = join(cwd, DARWIN_DIR, META_SPEC_FILE);
   if (!existsSync(path)) {
     throw new Error(
-      `no spec found at ${path}. Run \`darwin init\` first to create one.`,
+      `no spec found at ${formatPathForTerminal(path, { cwd })}. Run \`darwin init\` first to create one.`,
     );
   }
   const raw = readFileSync(path, "utf-8");

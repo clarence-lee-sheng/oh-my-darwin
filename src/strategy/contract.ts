@@ -1,6 +1,9 @@
-import { stderr } from "node:process";
+import { formatErrorSummary } from "../runtime/diagnostics.js";
+import { writeTerminalError } from "../runtime/terminal.js";
 import type { EvolutionRow } from "../state/history.js";
 import type { FrontierRecord } from "../state/frontier.js";
+
+const STRATEGY_HOOK_NAME_PREVIEW_CHARS = 120;
 
 /**
  * A read-only snapshot the strategy hooks see when deciding what to do
@@ -83,22 +86,105 @@ export function safeHook<T>(
   try {
     result = hookFn(...args);
   } catch (e) {
-    stderr.write(`darwin: strategy hook ${hookName} threw (${String(e).slice(0, 120)}); using default\n`);
+    writeTerminalError(
+      `darwin: strategy hook ${formatStrategyHookName(hookName)} threw (${formatErrorSummary(e, 120)}); using default`,
+    );
     return fallback();
   }
   if (!validate(result)) {
-    stderr.write(`darwin: strategy hook ${hookName} returned invalid shape; using default\n`);
+    writeTerminalError(
+      `darwin: strategy hook ${formatStrategyHookName(hookName)} returned invalid shape; using default`,
+    );
     return fallback();
   }
   return result;
 }
 
+export function formatStrategyHookName(value: unknown): string {
+  return formatErrorSummary(value, STRATEGY_HOOK_NAME_PREVIEW_CHARS);
+}
+
 export const isParentArray = (v: unknown): v is ParentAttempt[] =>
-  Array.isArray(v) && v.every((x) => x && typeof x === "object" && typeof (x as any).attempt_id === "string");
+  Array.isArray(v) && v.every(isParentAttempt);
 
 export const isString = (v: unknown): v is string => typeof v === "string";
 
 export const isBoolean = (v: unknown): v is boolean => typeof v === "boolean";
 
 export const isPopulation = (v: unknown): v is Population =>
-  !!v && typeof v === "object" && !!(v as any).frontier && typeof (v as any).frontier.attempt_id === "string";
+  !!v &&
+  typeof v === "object" &&
+  !Array.isArray(v) &&
+  isFrontierRecord((v as Partial<Population>).frontier) &&
+  (
+    (v as Partial<Population>).niches === undefined ||
+    isNicheMap((v as Partial<Population>).niches)
+  );
+
+function isParentAttempt(value: unknown): value is ParentAttempt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const parent = value as Partial<ParentAttempt>;
+  return (
+    isNonEmptyString(parent.attempt_id) &&
+    isNullableFiniteNumber(parent.score) &&
+    isNonEmptyString(parent.outcome) &&
+    optionalString(parent.goal) &&
+    optionalString(parent.rationale) &&
+    optionalStringRecord(parent.knobs)
+  );
+}
+
+function isFrontierRecord(value: unknown): value is FrontierRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const frontier = value as Partial<FrontierRecord>;
+  return (
+    isNonEmptyString(frontier.attempt_id) &&
+    isNullableFiniteNumber(frontier.score) &&
+    typeof frontier.t === "string"
+  );
+}
+
+function isNicheMap(value: unknown): value is Record<string, NicheEntry> {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.values(value).every(isNicheEntry)
+  );
+}
+
+function isNicheEntry(value: unknown): value is NicheEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Partial<NicheEntry>;
+  return (
+    isNonEmptyString(entry.attempt_id) &&
+    typeof entry.score === "number" &&
+    Number.isFinite(entry.score) &&
+    typeof entry.niche === "string" &&
+    optionalString(entry.run_dir)
+  );
+}
+
+function isNullableFiniteNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function optionalStringRecord(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (
+      !!value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Object.values(value).every((entry) => typeof entry === "string")
+    )
+  );
+}

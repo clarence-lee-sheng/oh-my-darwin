@@ -1,20 +1,35 @@
-import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { stderr } from "node:process";
 import {
   DEFAULT_ENGINE,
   engineCommand,
   engineEnv,
   engineExecArgs,
+  engineInteractiveArgs,
   fallbackEngine,
   fallbackNotice,
-  formatEngineCommand,
+  formatEngineCommandForLog,
   isEngineLaunchError,
   resolveEngineArgs,
   type EngineName,
 } from "../runtime/engine.js";
+import { spawnEngine } from "../runtime/bridge.js";
+import {
+  formatDurationMs,
+  formatErrorSummary,
+  formatMultilinePreview,
+  formatPathForTerminal,
+  resolvePositiveInt,
+} from "../runtime/diagnostics.js";
+import { fileExists, waitForFile } from "../runtime/file-wait.js";
+import { terminateChildProcess } from "../runtime/process-tree.js";
+import {
+  formatQuietChildStderrTail,
+  runQuietChild,
+} from "../runtime/quiet-child.js";
+import { writeTerminalError } from "../runtime/terminal.js";
+import { resolveProposerRunner, type ProposerRunner } from "./runner.js";
 
 export interface GoalCandidate {
   goal: string;
@@ -43,23 +58,26 @@ export interface ProposerInputs {
 export interface GoalProposerOptions {
   engine?: EngineName;
   engineArgs?: string[];
+  runner?: ProposerRunner;
+  outputPath?: string;
 }
 
 const DEFAULT_PROPOSER_TIMEOUT_MS = 2 * 60 * 1000;
+const MAX_GOAL_PROPOSER_TIMEOUT_MS = 10 * 60 * 1000;
+const INTERACTIVE_GOAL_PROPOSER_OUTPUT_POLL_MS = 250;
+const INTERACTIVE_GOAL_PROPOSER_OUTPUT_SETTLE_MS = 500;
+const INTERACTIVE_GOAL_PROPOSER_KILL_GRACE_MS = 5_000;
+const GOAL_PROPOSER_HISTORY_FIELD_CHARS = 200;
+const GOAL_PROPOSER_HINT_CHARS = 1_000;
+const GOAL_PROPOSER_TASK_CHARS = 20_000;
 
 export function buildGoalProposerPrompt(a: ProposerInputs): string {
-  const history = a.priorAttempts.length
-    ? a.priorAttempts
-        .slice(-5)
-        .map(
-          (p) =>
-            `- ${p.attempt_id} (score=${p.score ?? "null"}, ${p.outcome})${p.goal ? `\n    goal: ${truncate(p.goal, 200)}` : ""}${p.rationale ? `\n    why: ${truncate(p.rationale, 200)}` : ""}`,
-        )
-        .join("\n")
-    : "(none yet)";
+  const history = formatGoalProposerAttemptsForPrompt(a.priorAttempts);
+  const priorHint = formatGoalProposerHint(a.priorHint);
+  const task = formatGoalProposerTaskForPrompt(a.task);
 
-  const hint = a.priorHint
-    ? `\nADVISORY HINT FROM PRIOR ATTEMPT:\n${a.priorHint}\n`
+  const hint = priorHint
+    ? `\nADVISORY HINT FROM PRIOR ATTEMPT:\n${priorHint}\n`
     : "";
 
   return `You are darwin's meta-proposer for /goal-mode iteration.
@@ -71,10 +89,10 @@ Codex via its /goal slash command. Codex will then run autonomously toward
 the goal across multiple turns until it considers the goal satisfied.
 
 TASK:
-${a.task}
+${task}
 
 CURRENT FRONTIER:
-- attempt_id: ${a.frontierAttempt}
+- attempt_id: ${formatGoalProposerField(a.frontierAttempt)}
 - score: ${a.frontierScore ?? "null"}
 
 RECENT ATTEMPTS (most recent last):
@@ -97,10 +115,57 @@ no surrounding prose, no markdown fence, with these fields:
 GUIDANCE:
 - The goal should be specific enough that Codex knows when it is satisfied.
 - Avoid restating the entire task; assume Codex has read meta-spec.md.
-- Vary one or two dimensions vs the frontier — don't change everything at once.
+- Vary one or two dimensions vs the frontier - don't change everything at once.
 - Omit knob fields you don't want to override.
 
 Exit when you have emitted the JSON.`;
+}
+
+export function formatGoalProposerAttemptsForPrompt(
+  attempts: ProposerInputs["priorAttempts"],
+): string {
+  if (attempts.length === 0) return "(none yet)";
+  return attempts
+    .slice(-5)
+    .map((p) => {
+      const attempt = formatGoalProposerField(p.attempt_id);
+      const outcome = formatGoalProposerField(p.outcome);
+      const lines = [
+        `- ${attempt} (score=${p.score ?? "null"}, ${outcome})`,
+      ];
+      if (p.goal) {
+        lines.push(
+          `    goal: ${formatErrorSummary(p.goal, GOAL_PROPOSER_HISTORY_FIELD_CHARS)}`,
+        );
+      }
+      if (p.rationale) {
+        lines.push(
+          `    why: ${formatErrorSummary(p.rationale, GOAL_PROPOSER_HISTORY_FIELD_CHARS)}`,
+        );
+      }
+      return lines.join("\n");
+    })
+    .join("\n");
+}
+
+function formatGoalProposerField(value: unknown): string {
+  return formatErrorSummary(value, GOAL_PROPOSER_HISTORY_FIELD_CHARS);
+}
+
+export function formatGoalProposerHint(hint: string | undefined): string | undefined {
+  if (!hint?.trim()) return undefined;
+  return formatErrorSummary(hint.trim(), GOAL_PROPOSER_HINT_CHARS);
+}
+
+export function formatGoalProposerTaskForPrompt(
+  task: string,
+  specPathRel = ".darwin/meta-spec.md",
+): string {
+  return formatMultilinePreview(task, {
+    limit: GOAL_PROPOSER_TASK_CHARS,
+    indent: "",
+    truncatedSuffix: `...[truncated; full task saved to ${specPathRel}]`,
+  });
 }
 
 /**
@@ -122,17 +187,27 @@ export async function invokeGoalProposer(
 ): Promise<GoalCandidate> {
   const engine = options.engine ?? DEFAULT_ENGINE;
   const selectedEngineArgs = options.engineArgs ?? resolveEngineArgs(engine);
+  const runner = resolveProposerRunner(options.runner);
   try {
-    return await invokeGoalProposerWithEngine(prompt, cwd, engine, selectedEngineArgs);
+    return await invokeGoalProposerWithEngine(
+      prompt,
+      cwd,
+      engine,
+      selectedEngineArgs,
+      runner,
+      options.outputPath,
+    );
   } catch (err) {
     const fallback = fallbackEngine(engine);
     if (fallback && isEngineLaunchError(err)) {
-      stderr.write(fallbackNotice(engine, fallback, err));
+      writeTerminalError(fallbackNotice(engine, fallback, err));
       return await invokeGoalProposerWithEngine(
         prompt,
         cwd,
         fallback,
         resolveEngineArgs(fallback),
+        runner,
+        options.outputPath,
       );
     }
     throw err;
@@ -144,11 +219,24 @@ async function invokeGoalProposerWithEngine(
   cwd: string,
   engine: EngineName,
   selectedEngineArgs: string[],
+  runner: ProposerRunner,
+  outputPath?: string,
 ): Promise<GoalCandidate> {
+  if (runner === "interactive") {
+    return invokeInteractiveGoalProposerWithEngine(
+      prompt,
+      cwd,
+      engine,
+      selectedEngineArgs,
+      outputPath,
+    );
+  }
+
   const tmp = mkdtempSync(join(tmpdir(), "darwin-proposer-"));
   const lastMsgPath = join(tmp, "last.txt");
-  const timeoutMs = parsePositiveInt(process.env.DARWIN_GOAL_PROPOSER_TIMEOUT_MS)
-    ?? DEFAULT_PROPOSER_TIMEOUT_MS;
+  const timeoutMs = resolveGoalProposerTimeoutMs(
+    process.env.DARWIN_GOAL_PROPOSER_TIMEOUT_MS,
+  );
 
   try {
     const args = engineExecArgs(engine, selectedEngineArgs, [
@@ -162,41 +250,28 @@ async function invokeGoalProposerWithEngine(
       "-",
     ]);
 
-    stderr.write(`darwin: invoking ${formatEngineCommand(engine, args)} for goal proposer...\n`);
-    const code = await new Promise<number>((res, rej) => {
-      let timedOut = false;
-      let settled = false;
-      let timer: NodeJS.Timeout;
-      const child = spawn(engineCommand(engine), args, {
-        cwd,
-        env: engineEnv(engine),
-        stdio: ["pipe", "inherit", "inherit"],
-      });
-      const settle = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        fn();
-      };
-      timer = setTimeout(() => {
-        timedOut = true;
-        stderr.write(`darwin: goal proposer timed out after ${Math.round(timeoutMs / 1000)}s — terminating codex exec\n`);
-        try { child.kill("SIGTERM"); } catch { /* ignore */ }
-        setTimeout(() => {
-          try { child.kill("SIGKILL"); } catch { /* ignore */ }
-        }, 2_000).unref();
-      }, timeoutMs);
-      child.stdin?.end(prompt + "\n");
-      child.on("error", (e) => settle(() => rej(e)));
-      child.on("exit", (c) => {
-        settle(() => {
-          if (timedOut) res(124);
-          else res(c ?? 1);
-        });
-      });
+    writeTerminalError(
+      `darwin: invoking ${formatEngineCommandForLog(engine, args)} for goal proposer...`,
+    );
+    const result = await runQuietChild({
+      command: engineCommand(engine),
+      args,
+      cwd,
+      env: engineEnv(engine),
+      input: prompt + "\n",
+      timeoutMs,
+      timeoutLabel: "goal proposer",
+      writeStatus: writeTerminalError,
     });
-    if (code !== 0) {
-      throw new Error(`${engineCommand(engine)} exec exited ${code}`);
+    if (result.timedOut) {
+      throw new Error(
+        `${engineCommand(engine)} goal proposer timed out after ${formatDurationMs(timeoutMs)}`,
+      );
+    }
+    if (result.code !== 0) {
+      const tail = formatQuietChildStderrTail("goal proposer", result.stderrTail);
+      if (tail) writeTerminalError(tail);
+      throw new Error(`${engineCommand(engine)} exec exited ${result.code}`);
     }
 
     const raw = readFileSync(lastMsgPath, "utf-8");
@@ -204,6 +279,82 @@ async function invokeGoalProposerWithEngine(
   } finally {
     try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
   }
+}
+
+async function invokeInteractiveGoalProposerWithEngine(
+  prompt: string,
+  cwd: string,
+  engine: EngineName,
+  selectedEngineArgs: string[],
+  outputPath: string | undefined,
+): Promise<GoalCandidate> {
+  const tmp = outputPath ? undefined : mkdtempSync(join(tmpdir(), "darwin-goal-proposer-"));
+  const candidatePath = outputPath ?? join(tmp!, "candidate.json");
+  const args = engineInteractiveArgs(engine, selectedEngineArgs);
+  const interactivePrompt = `${prompt}
+
+IMPORTANT FOR DARWIN:
+Do not merely print the JSON. Write the final JSON object to this exact file path:
+${candidatePath}
+
+Create parent directories if needed. Darwin will detect the file and continue automatically.`;
+
+  try {
+    writeTerminalError(
+      `darwin: launching ${formatEngineCommandForLog(engine, args)} <goal proposer prompt> for interactive goal proposer`,
+    );
+    writeTerminalError(
+      `darwin: Darwin will continue automatically after the goal proposer writes ${formatGoalProposerCandidatePathForTerminal(candidatePath, cwd)}`,
+    );
+
+    const { child, exitInfo } = spawnEngine(engine, [interactivePrompt], {
+      cwd,
+      engineArgs: args,
+    });
+    const first = await Promise.race([
+      exitInfo.then((info) => ({ kind: "exit" as const, info })),
+      waitForFile(candidatePath, {
+        pollMs: INTERACTIVE_GOAL_PROPOSER_OUTPUT_POLL_MS,
+        settleMs: INTERACTIVE_GOAL_PROPOSER_OUTPUT_SETTLE_MS,
+      }).then(() => ({ kind: "file" as const })),
+    ]);
+
+    if (first.kind === "file") {
+      writeTerminalError(
+        "darwin: goal proposer wrote candidate; closing interactive proposer and continuing",
+      );
+      await terminateChildProcess(child, {
+        killGraceMs: INTERACTIVE_GOAL_PROPOSER_KILL_GRACE_MS,
+      });
+      return parseGoalCandidate(readFileSync(candidatePath, "utf-8"));
+    }
+
+    const { engine: completedEngine, code } = first.info;
+    if (!fileExists(candidatePath)) {
+      throw new Error(
+        `goal proposer did not write ${formatGoalProposerCandidatePathForTerminal(candidatePath, cwd)}`,
+      );
+    }
+    if (code !== 0) {
+      throw new Error(`${engineCommand(completedEngine)} exited with code ${code}`);
+    }
+    return parseGoalCandidate(readFileSync(candidatePath, "utf-8"));
+  } finally {
+    if (tmp) {
+      try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+}
+
+export function formatGoalProposerCandidatePathForTerminal(
+  candidatePath: string,
+  cwd = process.cwd(),
+): string {
+  return formatPathForTerminal(candidatePath, { cwd });
+}
+
+export function resolveGoalProposerTimeoutMs(raw: string | undefined): number {
+  return resolvePositiveInt(raw, DEFAULT_PROPOSER_TIMEOUT_MS, MAX_GOAL_PROPOSER_TIMEOUT_MS);
 }
 
 /**
@@ -216,7 +367,7 @@ export function parseGoalCandidate(raw: string): GoalCandidate {
   try {
     parsed = JSON.parse(text);
   } catch (e) {
-    throw new Error(`proposer output is not valid JSON: ${e}`);
+    throw new Error(`proposer output is not valid JSON: ${formatErrorSummary(e)}`);
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("proposer output must be a JSON object");
@@ -256,14 +407,4 @@ export function parseGoalCandidate(raw: string): GoalCandidate {
 function stripFence(s: string): string {
   const fence = s.match(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/);
   return fence ? fence[1] : s;
-}
-
-function truncate(s: string, n: number): string {
-  return s.length <= n ? s : s.slice(0, n - 1) + "…";
-}
-
-function parsePositiveInt(raw: string | undefined): number | null {
-  if (!raw) return null;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : null;
 }
